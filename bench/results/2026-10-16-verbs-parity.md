@@ -178,3 +178,20 @@ Next steps, in order:
 
 Work stops at this documented checkpoint; these next steps are not implemented
 or implied by the recorded benchmark results.
+
+## Update, later on 16 October
+
+- **Step 1 is done.** `systemctl --user start gufo@q8` on fuzzy starts both
+  ranks from the saved configuration (`~/.config/gufo/head.env`); rank 1 runs
+  as `gufo-rank1@q8` on misty. Both reported `rdma_ready` on usb4_rdma0, and
+  the server listened again after the follow-up tests.
+- **Step 4 is done for SEND, not for WRITE.** [Pre-armed SEND credits](2026-10-16-verbs-credits.md)
+  (`dmabuf_credits=1`, opt-in) specify and implement the receive-window
+  protocol for GPU SEND/SEND_WITH_IMM into posted receive WQEs. That covers
+  arbitrary target changes, slot reuse, bounds/keys, QP ordering, teardown,
+  generations and failure recovery. Direct SEND_IMM measured 87.8/91.0 µs at
+  32/10,304 B in that session, below its host-path controls; WRITE still needs
+  PREPARE. The measurements above are unchanged.
+- Steps 2, 3 and 5 remain open. To benefit from credits, Gufo's shared verbs
+  adapter would also post its GPU windows as receive WQEs and use
+  SEND_WITH_IMM for decode-size exchanges.
