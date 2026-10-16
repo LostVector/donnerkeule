@@ -534,12 +534,14 @@ static void tbv_service_remove(struct tb_service *svc)
 }
 
 /*
- * Reboot/poweroff hook, as thunderbolt_net has. Without it the control and data
- * rings keep running through device_shutdown() until the NHI's own shutdown
- * tears the domain down. Stops new TX, then the control ring, then the data
- * rings; tbv_service_remove() still runs later and finds them stopped. Never
- * waits for verbs users: userspace is already gone, and a hung shutdown needs a
- * power cycle.
+ * Reboot/poweroff hook, as thunderbolt_net has. Without it the rings stay
+ * allocated through device_shutdown() and the NHI's own shutdown warns about
+ * every one of them. Stops new TX and the control ring, stops the data rings,
+ * then runs the same path teardown as tbv_service_remove(): tunnel disabled,
+ * frames unmapped, rings freed. tbv_path_destroy() is idempotent, so the later
+ * remove finds nothing left to do. Never waits for verbs users: userspace is
+ * already gone, and a hung shutdown needs a power cycle. If the data rings
+ * cannot be stopped within the bounded wait, they are left for remove.
  */
 static void tbv_service_shutdown(struct tb_service *svc)
 {
@@ -554,9 +556,12 @@ static void tbv_service_shutdown(struct tb_service *svc)
 	rail->removing = true;
 	mutex_unlock(&tbv_service_state->lock);
 	tbv_control_stop(binding->peer);
+	tbv_native_control_cancel_rail(rail);
 	ret = tbv_dmabuf_quiesce_rail(rail);
-	dev_info(&svc->dev, "shutdown: control and data rings stopped, status %d\n",
-		 ret);
+	if (!ret)
+		tbv_path_destroy(&rail->path, binding->peer->xd);
+	dev_info(&svc->dev, "shutdown: rings stopped%s, status %d\n",
+		 ret ? "" : " and freed", ret);
 }
 
 static const struct tb_service_id tbv_service_ids[] = {
