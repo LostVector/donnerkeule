@@ -4,6 +4,7 @@
 > Donnerkeule is a fork of [thunderbolt-ibverbs](https://github.com/hellas-ai/thunderbolt-ibverbs) that adds striping, i.e.
 > making two cables appear as one to the software.
 > Use it to run [gufo-rdma](https://github.com/neuhaus/gufo) with two USB4 cables on Strix Halo for tensor parallelism speedups.
+> Use Linux kernel ≥7.2.
 > I achieve around 95% of Infiniband performance with it on average.
 
 > [!WARNING]
