@@ -432,6 +432,8 @@ struct tbv_qp {
 	u32 recv_head;
 	u32 recv_tail;
 	u32 recv_count;
+	/* Receive WQEs ever removed; identifies a peeked head for credits. */
+	u64 recv_popped;
 	u32 recv_credits_advertised;
 	u32 remote_recv_credits;
 	u32 early_remote_recv_credit_src_qp;
@@ -5767,6 +5769,8 @@ static int tbv_post_recv_impl(struct ib_qp *qp, const struct ib_recv_wr *wr,
 
 	if (posted)
 		tbv_qp_advertise_recv_credits(tqp);
+	if (posted)
+		tbv_dmabuf_recv_posted(tqp);
 	if (posted) {
 		mutex_lock(&tqp->rx_lock);
 		if (tbv_qp_uses_apple_transport(tqp))
@@ -5816,6 +5820,7 @@ static bool tbv_qp_pop_recv(struct tbv_qp *tqp, struct tbv_recv_wqe *wqe)
 	       sizeof(tqp->recvq[tqp->recv_head]));
 	tqp->recv_head = (tqp->recv_head + 1) % tqp->recvq_size;
 	tqp->recv_count--;
+	tqp->recv_popped++;
 	if (tqp->recv_credits_advertised)
 		tqp->recv_credits_advertised--;
 	atomic_dec(&tqp->owner->verbs_recv_wqes);
@@ -7387,6 +7392,7 @@ static void tbv_qp_flush_recv_wqes(struct tbv_qp *tqp)
 		       sizeof(tqp->recvq[tqp->recv_head]));
 		tqp->recv_head = (tqp->recv_head + 1) % tqp->recvq_size;
 		tqp->recv_count--;
+		tqp->recv_popped++;
 		if (tqp->recv_credits_advertised)
 			tqp->recv_credits_advertised--;
 		if (tqp->owner)
@@ -9528,7 +9534,10 @@ struct tbv_dmabuf_recv_ctx {
 	struct tbv_recv_wqe wqe;
 	struct tbv_native_data_header hdr;
 	u64 address;
+	/* A pre-armed credit inspects the head WQE without consuming it. */
+	u64 recv_popped;
 	bool has_recv;
+	bool peeked;
 };
 
 static bool tbv_dmabuf_send_alive(void *context)
@@ -9668,6 +9677,13 @@ static int tbv_dmabuf_recv_finish(void *context, int status)
 	bool imm = ctx->hdr.opcode == TBV_NATIVE_DATA_OP_SEND_IMM ||
 		   ctx->hdr.opcode == TBV_NATIVE_DATA_OP_RDMA_WRITE_IMM;
 
+	if (ctx->peeked && !ctx->has_recv) {
+		/* An unclaimed credit consumed no WQE and no PSN. */
+		tbv_mr_put(ctx->mr);
+		tbv_qp_put(tqp);
+		kfree(ctx);
+		return status;
+	}
 	mutex_lock(&tqp->rx_lock);
 	if (ctx->has_recv) {
 		struct tbv_cq *cq = container_of(tqp->base.recv_cq, struct tbv_cq, base);
@@ -9794,6 +9810,124 @@ fail:
 		tbv_qp_put(tqp);
 		kfree(ctx);
 	}
+	return ret;
+}
+
+/*
+ * Pre-arm the head receive WQE of a GPU SEND stream. Validates exactly as
+ * tbv_ibdev_dmabuf_begin() for a SEND of hdr->length at the QP's expected
+ * PSN, which it returns in hdr->psn, but leaves the WQE posted. Returns
+ * -EAGAIN with buffer->owner set (no reference) when the RQ is empty.
+ */
+int tbv_ibdev_dmabuf_peek(struct tbv_state *state, struct tbv_rail *rail,
+			  struct tbv_native_data_header *hdr,
+			  struct tbv_dmabuf_buffer *buffer)
+{
+	struct tbv_dmabuf_recv_ctx *ctx;
+	struct tbv_qp *tqp;
+	unsigned long flags;
+	u64 end, mr_end;
+	int ret = -EACCES;
+
+	if ((hdr->opcode != TBV_NATIVE_DATA_OP_SEND &&
+	     hdr->opcode != TBV_NATIVE_DATA_OP_SEND_IMM) || !hdr->length)
+		return -EINVAL;
+	tqp = tbv_qp_get_by_num(state, hdr->dest_qp);
+	if (!tqp)
+		return -ENOENT;
+	mutex_lock(&tqp->rx_lock);
+	hdr->psn = tqp->rx_expected_psn;
+	if (tqp->type != IB_QPT_RC || !tbv_qp_allows_post(tqp) ||
+	    tbv_qp_validate_native_endpoint(tqp, hdr) != TBV_RX_ENDPOINT_OK ||
+	    memcmp(tqp->rail->peer->remote_host_id, rail->peer->remote_host_id, 16))
+		goto put;
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx) {
+		ret = -ENOMEM;
+		goto put;
+	}
+	spin_lock_irqsave(&tqp->lock, flags);
+	if (!tqp->recv_count || tqp->closing) {
+		spin_unlock_irqrestore(&tqp->lock, flags);
+		kfree(ctx);
+		buffer->owner = tqp;
+		ret = -EAGAIN;
+		goto put;
+	}
+	ctx->wqe = tqp->recvq[tqp->recv_head];
+	ctx->recv_popped = tqp->recv_popped;
+	spin_unlock_irqrestore(&tqp->lock, flags);
+	ctx->tqp = tqp;
+	ctx->hdr = *hdr;
+	ctx->peeked = true;
+	ctx->mr = tbv_mr_get(state, ctx->wqe.lkey);
+	if (!ctx->mr || !ctx->mr->dmabuf || ctx->mr->base.pd != tqp->base.pd ||
+	    !(ctx->mr->access & IB_ACCESS_LOCAL_WRITE) ||
+	    hdr->length % 32 || ALIGN(hdr->length, SZ_4K) > ctx->wqe.length)
+		goto fail;
+	ctx->address = ctx->mr->virt_addr + ctx->wqe.addr - ctx->mr->start;
+	if (check_add_overflow(ctx->address, (u64)ALIGN(hdr->length, SZ_4K), &end) ||
+	    check_add_overflow(ctx->mr->virt_addr, ctx->mr->length, &mr_end) ||
+	    ctx->address < ctx->mr->virt_addr || end > mr_end ||
+	    (ctx->address - ctx->mr->virt_addr) % SZ_4K)
+		goto fail;
+	*buffer = (struct tbv_dmabuf_buffer) {
+		.mr = ctx->mr->dmabuf,
+		.offset = ctx->address - ctx->mr->virt_addr,
+		.owner = tqp,
+		.context = ctx,
+		.copy = tbv_dmabuf_recv_copy,
+		.alive = tbv_dmabuf_recv_alive,
+		.finish = tbv_dmabuf_recv_finish,
+	};
+	mutex_unlock(&tqp->rx_lock);
+	return 0;
+fail:
+	tbv_mr_put(ctx->mr);
+	kfree(ctx);
+put:
+	mutex_unlock(&tqp->rx_lock);
+	tbv_qp_put(tqp);
+	return ret;
+}
+
+/* Consume the WQE a credit armed, for the WR that arrived on it. Fails if
+ * anything else removed it or advanced the PSN; the armed pages stay valid
+ * either way, and finish() then reports without consuming a WQE. */
+int tbv_ibdev_dmabuf_claim(struct tbv_dmabuf_buffer *buffer,
+			   const struct tbv_native_data_header *hdr)
+{
+	struct tbv_dmabuf_recv_ctx *ctx = buffer->context;
+	struct tbv_qp *tqp = ctx->tqp;
+	unsigned long flags;
+	int ret = -ESTALE;
+
+	if (!ctx->peeked || ctx->has_recv)
+		return -EINVAL;
+	mutex_lock(&tqp->rx_lock);
+	if (hdr->psn != tqp->rx_expected_psn || hdr->length != ctx->hdr.length ||
+	    !tbv_qp_allows_post(tqp))
+		goto out;
+	/* The sequence check and the removal share one lock hold, so the
+	 * consumed WQE is the one whose pages the credit armed. */
+	spin_lock_irqsave(&tqp->lock, flags);
+	if (tqp->recv_popped == ctx->recv_popped && tqp->recv_count &&
+	    !tqp->closing) {
+		memset(&tqp->recvq[tqp->recv_head], 0,
+		       sizeof(tqp->recvq[tqp->recv_head]));
+		tqp->recv_head = (tqp->recv_head + 1) % tqp->recvq_size;
+		tqp->recv_count--;
+		tqp->recv_popped++;
+		if (tqp->recv_credits_advertised)
+			tqp->recv_credits_advertised--;
+		atomic_dec(&tqp->owner->verbs_recv_wqes);
+		ctx->has_recv = true;
+		ctx->hdr = *hdr;
+		ret = 0;
+	}
+	spin_unlock_irqrestore(&tqp->lock, flags);
+out:
+	mutex_unlock(&tqp->rx_lock);
 	return ret;
 }
 

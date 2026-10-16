@@ -39,6 +39,8 @@ static u32 tbv_native_control_caps(const struct tbv_state *state,
 		caps |= TBV_NATIVE_WIRE_CAP_CONTROL_RING;
 	if (tbv_control_push_enabled())
 		caps |= TBV_NATIVE_WIRE_CAP_PUSH_DONE;
+	if (tbv_dmabuf_credits_enabled())
+		caps |= TBV_NATIVE_WIRE_CAP_DMABUF_CREDIT;
 	if (tbv_gpu_direct_enabled())
 		caps = TBV_NATIVE_WIRE_CAP_GPU_DIRECT | TBV_NATIVE_WIRE_CAP_MULTI_RAIL;
 
@@ -292,6 +294,8 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 				!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_CONTROL_RING);
 			peer->remote_push_done =
 				!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_PUSH_DONE);
+			peer->remote_dmabuf_credit =
+				!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_DMABUF_CREDIT);
 			rail->remote_rail_id = remote->rail_id;
 			rail->remote_transmit_path = remote->transmit_path;
 			rail->remote_tx_hop = remote->tx_hop;

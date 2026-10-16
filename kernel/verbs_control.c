@@ -54,6 +54,7 @@ struct tbv_ctrl_pending {
 	struct completion reply, done;
 	u16 expected;
 	int status, done_status;
+	u32 reply_credit;
 	bool replied, completed;
 };
 
@@ -292,7 +293,10 @@ void tbv_control_handle_done(struct tbv_state *state, struct tb_xdomain *source,
 	ctrl = READ_ONCE(found->dmabuf_control);
 	if (ctrl && ctrl->xdomain && tbv_control_ready(found)) {
 		atomic64_inc(&ctrl->counters[CTRL_RX]);
-		tbv_ctrl_reply(ctrl, m);
+		if (m->op == (TBV_DMABUF_CREDIT | TBV_DMABUF_REPLY))
+			tbv_dmabuf_credit_received(found, m);
+		else
+			tbv_ctrl_reply(ctrl, m);
 	}
 	tbv_peer_put(state, found);
 }
@@ -831,8 +835,9 @@ void tbv_control_close(struct tbv_ctrl_pending *p)
 	kfree(p);
 }
 
-int tbv_control_xdomain_exchange(struct tbv_peer *peer,
-				 const struct tbv_dmabuf_wire *m, u32 timeout_ms)
+static int tbv_ctrl_xdomain_exchange(struct tbv_peer *peer,
+				     const struct tbv_dmabuf_wire *m, u32 timeout_ms,
+				     u32 *credit)
 {
 	struct tbv_dmabuf_wire reply;
 	u8 request[TBV_DMABUF_WIRE_SIZE], response[TBV_DMABUF_WIRE_SIZE] = {};
@@ -857,7 +862,15 @@ int tbv_control_xdomain_exchange(struct tbv_peer *peer,
 	    reply.op != (m->op | TBV_DMABUF_REPLY) ||
 	    !tbv_dmabuf_wire_same(m, &reply, true))
 		return -EPROTO;
+	if (credit)
+		*credit = reply.credit;
 	return reply.status;
+}
+
+int tbv_control_xdomain_exchange(struct tbv_peer *peer,
+				 const struct tbv_dmabuf_wire *m, u32 timeout_ms)
+{
+	return tbv_ctrl_xdomain_exchange(peer, m, timeout_ms, NULL);
 }
 
 int tbv_control_exchange(struct tbv_ctrl_pending *p,
@@ -872,13 +885,15 @@ int tbv_control_exchange(struct tbv_ctrl_pending *p,
 	reinit_completion(&p->reply);
 	p->expected = m->op;
 	p->replied = false;
+	p->reply_credit = 0;
 	ret = ctrl->failure;
 	spin_unlock_irqrestore(&ctrl->lock, flags);
 	if (ret)
 		return ret;
 	if (ctrl->xdomain) {
 		atomic64_inc(&ctrl->counters[CTRL_TX]);
-		return tbv_control_xdomain_exchange(ctrl->peer, m, timeout_ms);
+		return tbv_ctrl_xdomain_exchange(ctrl->peer, m, timeout_ms,
+						 &p->reply_credit);
 	}
 	start = tbv_perf_clock();
 	ret = tbv_ctrl_send(ctrl, m);
@@ -897,6 +912,17 @@ int tbv_control_exchange(struct tbv_ctrl_pending *p,
 	return ret;
 }
 
+/* The credit a READY reply adopted; credits exist only in XDomain mode. */
+u32 tbv_control_reply_credit(const struct tbv_ctrl_pending *p)
+{
+	return p ? p->reply_credit : 0;
+}
+
+struct tbv_control *tbv_control_of(const struct tbv_ctrl_pending *p)
+{
+	return p ? p->ctrl : NULL;
+}
+
 int tbv_control_wait_done(struct tbv_ctrl_pending *p, u32 timeout_ms)
 {
 	unsigned long flags;
@@ -908,6 +934,31 @@ int tbv_control_wait_done(struct tbv_ctrl_pending *p, u32 timeout_ms)
 	ret = p->ctrl->failure ?: (p->completed ? p->done_status : TBV_DMABUF_BUSY);
 	spin_unlock_irqrestore(&p->ctrl->lock, flags);
 	tbv_perf_wire(&p->key, true, "done_wait", start, ret, 0);
+	return ret;
+}
+
+/* Credits require pushed notifications on XDomain from both peers. */
+bool tbv_control_credits(const struct tbv_control *ctrl)
+{
+	return ctrl && ctrl->xdomain && READ_ONCE(ctrl->running) &&
+		!READ_ONCE(ctrl->failure) && tbv_dmabuf_credits_enabled() &&
+		READ_ONCE(ctrl->peer->remote_dmabuf_credit);
+}
+
+/* One-way CREDIT, COMMIT or RELEASE. Like DONE it is an XDomain response,
+ * consumed by the peer's protocol handler before core response matching. */
+int tbv_control_notify(struct tbv_control *ctrl, const struct tbv_dmabuf_wire *m)
+{
+	u8 packet[TBV_DMABUF_WIRE_SIZE];
+	int ret;
+
+	if (!tbv_control_credits(ctrl))
+		return -ENOTCONN;
+	ret = tbv_dmabuf_wire_build(packet, sizeof(packet), m, ctrl->xd->route);
+	if (ret >= 0)
+		ret = tb_xdomain_response(ctrl->xd, packet, sizeof(packet),
+					 TB_CFG_PKG_XDOMAIN_RESP);
+	atomic64_inc(&ctrl->counters[ret ? CTRL_NOTIFY_FAILED : CTRL_TX]);
 	return ret;
 }
 

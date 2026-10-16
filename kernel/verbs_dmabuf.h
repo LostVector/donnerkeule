@@ -20,6 +20,10 @@ struct tbv_dmabuf_buffer {
 };
 
 bool tbv_dmabuf_verbs_enabled(void);
+bool tbv_dmabuf_credits_enabled(void);
+void tbv_dmabuf_recv_posted(void *owner);
+void tbv_dmabuf_credit_received(struct tbv_peer *peer,
+				const struct tbv_dmabuf_wire *m);
 void tbv_dmabuf_debugfs_show(struct seq_file *s);
 int tbv_dmabuf_start(struct tbv_state *state);
 void tbv_dmabuf_stop(void);
@@ -40,5 +44,10 @@ int tbv_dmabuf_submit(struct tbv_state *state, struct tbv_rail *rail,
 int tbv_ibdev_dmabuf_begin(struct tbv_state *state, struct tbv_rail *rail,
 			    const struct tbv_native_data_header *hdr,
 			    struct tbv_dmabuf_buffer *buffer);
+int tbv_ibdev_dmabuf_peek(struct tbv_state *state, struct tbv_rail *rail,
+			  struct tbv_native_data_header *hdr,
+			  struct tbv_dmabuf_buffer *buffer);
+int tbv_ibdev_dmabuf_claim(struct tbv_dmabuf_buffer *buffer,
+			   const struct tbv_native_data_header *hdr);
 
 #endif

@@ -139,6 +139,41 @@ int main(void)
 	m = message(4, 1);
 	m.token = 0;
 	assert(tbv_dmabuf_shape(&m) == -EINVAL);
+	/* Credit notifications carry a nonzero sequence at byte 164; every
+	 * other operation keeps it zero. All are consumed before core matching. */
+	for (op = TBV_DMABUF_CREDIT; op <= TBV_DMABUF_RELEASE; op++) {
+		m = message(2, 10304);
+		m.hdr.opcode = TBV_NATIVE_DATA_OP_SEND_IMM;
+		m.op = op | TBV_DMABUF_REPLY;
+		m.status = op == TBV_DMABUF_CREDIT ? -ECANCELED : 0;
+		assert(tbv_dmabuf_wire_build(packet, sizeof(packet), &m, 1) == -EINVAL);
+		m.credit = 0x01020304;
+		assert(tbv_dmabuf_wire_build(packet, sizeof(packet), &m, 1) == 252);
+		assert(packet[164] == 4 && packet[167] == 1);
+		assert(tbv_dmabuf_wire_notification(packet, sizeof(packet)));
+		assert(tbv_dmabuf_wire_parse(packet, sizeof(packet), &decoded) == 0);
+		assert(decoded.op == m.op && decoded.credit == m.credit &&
+		       decoded.status == m.status);
+		assert(tbv_dmabuf_wire_same(&m, &decoded, true));
+		memcpy(bad, packet, sizeof(bad));
+		memset(bad + 164, 0, 4);
+		assert(tbv_dmabuf_wire_parse(bad, sizeof(bad), &decoded) == -EINVAL);
+		assert(tbv_dmabuf_wire_notification(bad, sizeof(bad)));
+	}
+	m = message(2, 4096);
+	m.credit = 1;
+	assert(tbv_dmabuf_wire_build(packet, sizeof(packet), &m, 1) == -EINVAL);
+	/* A READY reply names the pre-armed credit its PREPARE adopted. */
+	m.op = TBV_DMABUF_PREPARE | TBV_DMABUF_REPLY;
+	assert(tbv_dmabuf_wire_build(packet, sizeof(packet), &m, 1) == 252);
+	assert(!tbv_dmabuf_wire_notification(packet, sizeof(packet)));
+	assert(tbv_dmabuf_wire_parse(packet, sizeof(packet), &decoded) == 0);
+	assert(decoded.credit == 1);
+	m.op = TBV_DMABUF_STATUS | TBV_DMABUF_REPLY;
+	assert(tbv_dmabuf_wire_build(packet, sizeof(packet), &m, 1) == -EINVAL);
+	m.op = 13;
+	m.credit = 0;
+	assert(tbv_dmabuf_wire_build(packet, sizeof(packet), &m, 1) == -EINVAL);
 	{
 		unsigned char frame[TBV_CTRL_FRAME_SIZE], broken[TBV_CTRL_FRAME_SIZE];
 		unsigned char setup[TBV_CTRL_SETUP_SIZE];

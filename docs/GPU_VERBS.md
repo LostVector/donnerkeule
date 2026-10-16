@@ -8,6 +8,12 @@ langsamer; vollständige Latenzparität und Gufo-Integration sind damit nicht
 qualifiziert. Für diese Messungen war `dmabuf_push_done=1` ausdrücklich gesetzt.
 Die Standardwerte bleiben unverändert.
 
+Nachtrag: [Vorbereitete SEND-Credits](../bench/results/2026-10-16-verbs-credits.md)
+(`dmabuf_credits=1`, standardmäßig aus) entfernen PREPARE bei GPU-SENDs in
+gepostete Receive-WQEs. Im Muster ohne Barriere sanken 32 B und 10.304 B auf
+etwa 88–91 µs je geprüfter Nachricht; WRITE bleibt unverändert. Siehe
+[Vorbereitete SEND-Credits](#vorbereitete-send-credits).
+
 Der neue native Modus `dmabuf_verbs=1` importiert HIP-DMA-BUFs über
 `ibv_reg_dmabuf_mr()` und verwendet ihre NHI-DMA-Adressen hinter normalen
 `ibv_post_send()`, `ibv_post_recv()` und CQ-Completions. Die Nutzdaten werden
@@ -167,6 +173,65 @@ Kontrollframes, PREPARE, DONE, STATUS, unbeantwortete Zuordnungen und Pooldruck.
 keine isolierten CPU-Zyklen. Die separate Messung und der Vergleich bei
 gleicher sowie voller Datenrail-Zahl stehen im Ergebnisbericht.
 
+## Vorbereitete SEND-Credits
+
+`dmabuf_credits=1` (Standard 0) entfernt bei GPU-SENDs den PREPARE-Roundtrip
+vom kritischen Pfad. Voraussetzung sind `dmabuf_push_done=1`,
+`dmabuf_control_ring=0` und die über HELLO ausgehandelte Fähigkeit
+`DMABUF_CREDIT` auf beiden Peers; sonst bleibt der bisherige Ablauf aktiv.
+Die Frames eines NHI-RX-Rings landen in der Reihenfolge der geposteten
+Deskriptoren. Ein Ziel muss deshalb vor den Daten bekannt sein. Bei SEND
+kennt es der Empfänger: Es ist die nächste Receive-WQE. Bei WRITE kennt es
+nur der Sender; WRITE behält PREPARE.
+
+Ablauf:
+
+1. Nach einem erfolgreich platzierten GPU-SEND bzw. SEND_WITH_IMM merkt sich
+   der Empfänger QP, Länge und Lanes. Steht die nächste WQE schon bereit oder
+   wird sie später gepostet (`ibv_post_recv()`), prüft der Treiber sie wie
+   bei PREPARE (QP, PD, lkey, Rechte, Bereich, 4-KiB-Ausrichtung) und armiert
+   ihre GPU-Seiten für genau diese Länge und den erwarteten PSN. Die WQE
+   bleibt gepostet. Anschließend sendet er CREDIT an den Sender.
+2. Ein SEND mit gleichem Ziel-QP, PSN, gleicher Länge und gleichen Lanes
+   verwendet den Credit. Der Sender meldet COMMIT einseitig mit den vollständigen
+   WR-Metadaten und postet seine Frames sofort, ohne auf eine Antwort zu
+   warten. Der Empfänger übernimmt die WQE erst bei COMMIT; Replay-Wasserzeichen,
+   QP-, PSN- und Lane-Prüfungen gelten wie bei PREPARE. DONE und die
+   STATUS-Wiederherstellung bleiben unverändert.
+3. Kreuzt sich ein PREPARE mit einem noch unterwegs befindlichen Credit,
+   übernimmt der Empfänger das Armieren für diesen PREPARE und nennt den
+   Credit in READY. Der Sender verwirft ihn dann.
+4. Ein Credit, den der nächste WR nicht verwenden kann (andere Länge oder
+   Operation, mehrere Batches), wird vor dessen PREPARE freigegeben: Der
+   Sender füllt genau die armierten Frames mit Nullen und meldet RELEASE. Ein
+   nicht passender PREPARE erhält BUSY und löst ein CANCEL aus. QP-Zerstörung
+   oder QP-Fehler beim Empfänger fordert die Freigabe ebenfalls an und wartet
+   bis zu 500 ms. Ohne RELEASE werden die Rails wie bei jedem Abbruch nach dem
+   Armieren stillgelegt.
+5. Erhält ein PREPARE RNR, wartet der Sender bis zu 2 ms auf einen Credit
+   statt 1–2 ms zu schlafen und erneut zu fragen. Das Posten der WQE beim
+   Empfänger ist damit das Signal zum Senden.
+
+Credits gelten nur für einen Batch und höchstens `dmabuf_credit_max` Byte
+(Standard 1 MiB). Es gibt höchstens einen armierten Credit je Empfänger, wie
+es auch nur eine aktive RX-Transaktion gibt. Die Credit-Nummer liegt im bisher
+reservierten Feld bei Byte 164; ältere Peers handeln die Fähigkeit nicht aus.
+
+**Speichervertrag im Credit-Modus:** Solange eine GPU-Receive-WQE gepostet ist,
+kann eine Freigabe ihre ersten `ALIGN(L, 4096)` Byte mit Nullen überschreiben,
+wobei L die Länge des vorherigen SENDs auf diesem QP ist. Das geschieht nur,
+wenn der folgende WR den Credit nicht verwendet. Bytes jenseits der Länge eines
+später kürzer empfangenen SENDs sind dann nicht mehr die vor dem Posten
+geschriebenen Werte. Wer Inhalte hinter der empfangenen Länge erwartet, darf
+den Modus nicht verwenden.
+
+Debugfs `summary` zeigt `dmabuf_credits`, `dmabuf_credit_max` sowie
+`dmabuf_credit_granted`, `committed`, `adopted`, `released`, `canceled`,
+`aborted` (Empfänger) und `used`, `returned`, `stale` (Sender). `mismatch`
+zählt unerwartete Credit-Meldungen; deren Lanes werden stillgelegt.
+Profiling-Tracepoints: `credit_grant`, `credit_received`, `credit_commit`,
+`credit_commit_rx`, `credit_release`, `credit_release_rx`, `rnr_credit_wait`.
+
 ## Schnittstelle und Speichervertrag
 
 - Native RC-QPs: SEND, SEND_WITH_IMM, RDMA_WRITE und RDMA_WRITE_WITH_IMM.
@@ -282,9 +347,12 @@ keine reine DMA-Zeit. `--bytes N --op WRITE_IMM` wählt eine einzelne Größe un
 Operation aus; beide Peers müssen dieselbe Auswahl verwenden.
 
 `--depth 1|2|3` wählt die Anzahl der ausstehenden Fenster. `--persistent-rq`
-hält vier generische Zero-SGE-Receive-WQEs vor und ergänzt sie beim Abholen der
-CQ, wie Gufos Verbs-Adapter. Diese Profiling-Option ist auf `--op WRITE_IMM`
-ohne Fehler- oder RNR-Verzögerungsproben beschränkt. Die Nachricht wird weiterhin
+hält mit `--op WRITE_IMM` vier generische Zero-SGE-Receive-WQEs vor und ergänzt sie beim Abholen der
+CQ, wie Gufos Verbs-Adapter. Mit `--op SEND` oder `--op SEND_IMM` sind die
+Fenster selbst die Receive-WQEs: Nach der vollständigen Prüfung und dem
+Vorwärmen des nächsten Durchlaufs wird jedes Fenster erneut gepostet. Dieses
+Posten gibt das Fenster zurück; eine Barriere je Nachricht entfällt. Die
+Option ist ohne Fehler- oder RNR-Verzögerungsproben zu verwenden. Die Nachricht wird weiterhin
 an IMM, Länge, Reihenfolge, Nutzdaten und Wächterbytes geprüft. Eine vorzeitig
 eingetroffene nächste Barriere wird bis zur nächsten Iteration vorgemerkt.
 Die Barrieren halten die DMA-Platzierung weiterhin hinter der Freigabe des

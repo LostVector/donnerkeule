@@ -19,6 +19,12 @@ enum tbv_dmabuf_op {
 	TBV_DMABUF_ABORT = 7,
 	TBV_DMABUF_COMPLETE = 8,
 	TBV_DMABUF_PING = 9,
+	/* Optional pre-armed SEND credits, see GPU_VERBS.md. All three are
+	 * one-way notifications; CREDIT travels from the data receiver. */
+	TBV_DMABUF_CREDIT = 10,
+	TBV_DMABUF_COMMIT = 11,
+	TBV_DMABUF_RELEASE = 12,
+	TBV_DMABUF_OP_LAST = TBV_DMABUF_RELEASE,
 };
 
 enum tbv_dmabuf_status {
@@ -44,21 +50,39 @@ struct tbv_dmabuf_wire {
 	tbv_wire_u32 offset;
 	tbv_wire_u32 bytes;
 	tbv_wire_u32 count;
+	/* Credit sequence for CREDIT/COMMIT/RELEASE, or the credit a READY
+	 * reply adopted for its PREPARE; zero otherwise. */
+	tbv_wire_u32 credit;
 	struct tbv_dmabuf_wire_lane lanes[TBV_DMABUF_MAX_RAILS];
 };
 
+static inline bool tbv_dmabuf_credit_op(tbv_wire_u16 op)
+{
+	op &= ~TBV_DMABUF_REPLY;
+	return op == TBV_DMABUF_CREDIT || op == TBV_DMABUF_COMMIT ||
+	       op == TBV_DMABUF_RELEASE;
+}
+
+static inline bool tbv_dmabuf_notification_op(tbv_wire_u16 op)
+{
+	return (op & ~TBV_DMABUF_REPLY) == TBV_DMABUF_COMPLETE ||
+	       tbv_dmabuf_credit_op(op);
+}
+
 /* Identify notifications even when their body fails validation. XDomain's
  * core response matcher checks route/UUID, not our opcode/token, so a bad or
- * stale DONE must never satisfy a concurrent PREPARE or HELLO request. */
+ * stale DONE or credit must never satisfy a concurrent PREPARE or HELLO. */
 static inline bool tbv_dmabuf_wire_notification(const void *buf, size_t size)
 {
 	const tbv_wire_u8 *p = buf;
+	tbv_wire_u32 type;
 
-	return p && size >= TBV_NATIVE_WIRE_XDOMAIN_HDR_SIZE &&
-		!memcmp(p + 12, tbv_native_wire_uuid, 16) &&
-		((tbv_wire_get_le32(p + 28) & ~TBV_DMABUF_REPLY) == TBV_DMABUF_COMPLETE ||
-		 (size >= 40 &&
-		  (tbv_wire_get_le16(p + 38) & ~TBV_DMABUF_REPLY) == TBV_DMABUF_COMPLETE));
+	if (!p || size < TBV_NATIVE_WIRE_XDOMAIN_HDR_SIZE ||
+	    memcmp(p + 12, tbv_native_wire_uuid, 16))
+		return false;
+	type = tbv_wire_get_le32(p + 28);
+	return (type <= 0xffffu && tbv_dmabuf_notification_op(type)) ||
+		(size >= 40 && tbv_dmabuf_notification_op(tbv_wire_get_le16(p + 38)));
 }
 
 static inline bool tbv_dmabuf_opcode(tbv_wire_u8 op)
@@ -82,6 +106,8 @@ static inline int tbv_dmabuf_shape(const struct tbv_dmabuf_wire *m)
 	    m->offset > m->hdr.length ||
 	    m->bytes > m->hdr.length - m->offset ||
 	    m->offset % TBV_DMABUF_FRAME_BYTES ||
+	    (tbv_dmabuf_credit_op(m->op) ? !m->credit :
+	     m->credit && m->op != (TBV_DMABUF_PREPARE | TBV_DMABUF_REPLY)) ||
 	    (m->offset + m->bytes != m->hdr.length &&
 	     m->bytes % TBV_DMABUF_FRAME_BYTES) ||
 	    (!m->bytes && m->hdr.length))
@@ -103,7 +129,7 @@ static inline int tbv_dmabuf_wire_build(void *buf, size_t size,
 	int ret;
 
 	if (!buf || size < TBV_DMABUF_WIRE_SIZE ||
-	    op < TBV_DMABUF_PREPARE || op > TBV_DMABUF_PING)
+	    op < TBV_DMABUF_PREPARE || op > TBV_DMABUF_OP_LAST)
 		return -EINVAL;
 	ret = tbv_dmabuf_shape(m);
 	if (ret)
@@ -125,6 +151,7 @@ static inline int tbv_dmabuf_wire_build(void *buf, size_t size,
 	tbv_wire_put_le32(p + 152, m->offset);
 	tbv_wire_put_le32(p + 156, m->bytes);
 	tbv_wire_put_le32(p + 160, m->count);
+	tbv_wire_put_le32(p + 164, m->credit);
 	for (i = 0; i < m->count; i++) {
 		memcpy(p + 168 + i * 20, m->lanes[i].domain, 16);
 		tbv_wire_put_le32(p + 184 + i * 20, m->lanes[i].path);
@@ -146,12 +173,11 @@ static inline int tbv_dmabuf_wire_parse(const void *buf, size_t size,
 		(TBV_DMABUF_WIRE_SIZE - 12) / 4 ||
 	    tbv_wire_get_le32(p + 32) != TBV_DMABUF_WIRE_MAGIC ||
 	    tbv_wire_get_le16(p + 36) != TBV_DMABUF_WIRE_VERSION ||
-	    tbv_wire_get_le32(p + 40) || tbv_wire_get_le32(p + 164) ||
-	    tbv_wire_get_le32(p + 248))
+	    tbv_wire_get_le32(p + 40) || tbv_wire_get_le32(p + 248))
 		return -EINVAL;
 	op = tbv_wire_get_le16(p + 38);
 	if ((op & ~TBV_DMABUF_REPLY) < TBV_DMABUF_PREPARE ||
-	    (op & ~TBV_DMABUF_REPLY) > TBV_DMABUF_PING ||
+	    (op & ~TBV_DMABUF_REPLY) > TBV_DMABUF_OP_LAST ||
 	    tbv_wire_get_le32(p + 28) != op)
 		return -EINVAL;
 	memset(m, 0, sizeof(*m));
@@ -168,6 +194,7 @@ static inline int tbv_dmabuf_wire_parse(const void *buf, size_t size,
 	m->offset = tbv_wire_get_le32(p + 152);
 	m->bytes = tbv_wire_get_le32(p + 156);
 	m->count = tbv_wire_get_le32(p + 160);
+	m->credit = tbv_wire_get_le32(p + 164);
 	if (m->count > TBV_DMABUF_MAX_RAILS)
 		return -EINVAL;
 	for (i = 0; i < TBV_DMABUF_MAX_RAILS; i++) {

@@ -66,6 +66,8 @@ enum tbv_native_wire_cap {
 	TBV_NATIVE_WIRE_CAP_CONTROL_RING = 1u << 5,
 	/* Pushed descriptor DONE on the existing configuration channel. */
 	TBV_NATIVE_WIRE_CAP_PUSH_DONE = 1u << 6,
+	/* Pre-armed GPU SEND receive credits; requires PUSH_DONE. */
+	TBV_NATIVE_WIRE_CAP_DMABUF_CREDIT = 1u << 7,
 };
 
 enum tbv_native_wire_path_flag {

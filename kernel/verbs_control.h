@@ -34,6 +34,10 @@ void tbv_control_close(struct tbv_ctrl_pending *p);
 int tbv_control_exchange(struct tbv_ctrl_pending *p,
 			 const struct tbv_dmabuf_wire *m, u32 timeout_ms);
 int tbv_control_wait_done(struct tbv_ctrl_pending *p, u32 timeout_ms);
+u32 tbv_control_reply_credit(const struct tbv_ctrl_pending *p);
+struct tbv_control *tbv_control_of(const struct tbv_ctrl_pending *p);
+bool tbv_control_credits(const struct tbv_control *ctrl);
+int tbv_control_notify(struct tbv_control *ctrl, const struct tbv_dmabuf_wire *m);
 void tbv_control_done(struct tbv_control *ctrl,
 		      const struct tbv_dmabuf_wire *m, int status);
 void tbv_control_debugfs_init(struct tbv_state *state, struct dentry *dir);

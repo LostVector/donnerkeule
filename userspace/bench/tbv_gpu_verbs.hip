@@ -494,7 +494,9 @@ struct Link {
 		verbs_check(ibv_modify_qp(qp, &a, IBV_QP_STATE | IBV_QP_TIMEOUT |
 					IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
 					IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC), "QP RTS");
-		persistent_rq = o.persistent_rq;
+		// SEND keeps real receive WQEs: the persistent windows are the
+		// receive buffers themselves, reposted after their consumer.
+		persistent_rq = o.persistent_rq && o.operation == 2;
 		spin_us = o.spin_us;
 		if (persistent_rq)
 			for (unsigned i = 0; i < 4; i++)
@@ -727,9 +729,34 @@ static void run(Link &link, Rdma &rdma, Gpu &gpu, Pool &tx_pool, Pool &rx_pool,
 		bool write = operations[op] == IBV_WR_RDMA_WRITE;
 		bool send_op = operations[op] == IBV_WR_SEND || operations[op] == IBV_WR_SEND_WITH_IMM;
 		bool with_imm = operations[op] != IBV_WR_SEND;
+		// Persistent SEND: each window's receive WQE is posted once its
+		// consumer has verified it and the next prewarm has completed, so
+		// the post itself hands the window back. No barrier per message.
+		bool send_persistent = o.persistent_rq && send_op;
+		const auto arm_windows = [&](uint32_t bytes, uint32_t first) {
+			for (unsigned slot = 0; slot < o.depth; slot++) {
+				HIP(hipMemsetAsync(rx_gpu + slot * stride, 0xa5, bytes + 64, gpu.stream));
+				consume<<<128, 256, 0, gpu.stream>>>(rx_gpu + slot * stride, bytes,
+					first + slot, 1 - o.rank, gpu.result, false);
+			}
+			HIP(hipGetLastError());
+			HIP(hipStreamSynchronize(gpu.stream));
+			if (o.host_mr)
+				for (unsigned slot = 0; slot < o.depth; slot++)
+					memset(static_cast<uint8_t *>(host_rx.data) + slot * stride, 0xa5, bytes + 64);
+			for (unsigned slot = 0; slot < o.depth; slot++)
+				link.recv(first + slot, rdma.rx, slot * stride,
+					  (bytes + 4095u) / 4096u * 4096u, o.host_mr);
+		};
 		for (uint32_t bytes : sizes) {
 			double microseconds = 0;
 			std::array<double, 8> phases{};
+			if (send_persistent) {
+				// Both peers' windows are posted before either sends.
+				link.recv(barrier_id);
+				arm_windows(bytes, generation);
+				link.barrier(true);
+			}
 			for (unsigned iteration = 0; iteration < o.iterations; iteration++) {
 				profile.context = {o.rank, round, iteration, generation, bytes, o.depth,
 					link.qp->qp_num, names[op]};
@@ -771,13 +798,15 @@ static void run(Link &link, Rdma &rdma, Gpu &gpu, Pool &tx_pool, Pool &rx_pool,
 				mark(0);
 				for (unsigned slot = 0; slot < count; slot++) {
 					size_t offset = slot * stride;
-					timing.begin(slot * 4, "rx_prewarm", slot, gpu.stream);
-					HIP(hipMemsetAsync(rx_gpu + offset, 0xa5, bytes + 64, gpu.stream));
-					HIP(hipMemsetAsync(gpu.result, 0, 16, gpu.stream));
-					// Touch RX with a GPU read before external DMA.
-					consume<<<128, 256, 0, gpu.stream>>>(rx_gpu + offset, bytes,
-						generation + slot, 1 - o.rank, gpu.result, false);
-					timing.end(slot * 4, gpu.stream);
+					if (!send_persistent) {
+						timing.begin(slot * 4, "rx_prewarm", slot, gpu.stream);
+						HIP(hipMemsetAsync(rx_gpu + offset, 0xa5, bytes + 64, gpu.stream));
+						HIP(hipMemsetAsync(gpu.result, 0, 16, gpu.stream));
+						// Touch RX with a GPU read before external DMA.
+						consume<<<128, 256, 0, gpu.stream>>>(rx_gpu + offset, bytes,
+							generation + slot, 1 - o.rank, gpu.result, false);
+						timing.end(slot * 4, gpu.stream);
+					}
 					timing.begin(slot * 4 + 1, "producer", slot, gpu.stream);
 					produce<<<128, 256, 0, gpu.stream>>>(tx_gpu + offset, bytes,
 						generation + slot, o.rank);
@@ -785,7 +814,8 @@ static void run(Link &link, Rdma &rdma, Gpu &gpu, Pool &tx_pool, Pool &rx_pool,
 					HIP(hipGetLastError());
 					if (o.host_mr) {
 						timing.begin(slot * 4 + 2, "tx_copy", slot, gpu.stream);
-						memset(static_cast<uint8_t *>(host_rx.data) + offset, 0xa5, bytes + 64);
+						if (!send_persistent)
+							memset(static_cast<uint8_t *>(host_rx.data) + offset, 0xa5, bytes + 64);
 						HIP(hipMemcpyAsync(static_cast<uint8_t *>(host_tx.data) + offset,
 							tx_gpu + offset, bytes, hipMemcpyDeviceToHost, gpu.stream));
 						timing.end(slot * 4 + 2, gpu.stream);
@@ -800,7 +830,7 @@ static void run(Link &link, Rdma &rdma, Gpu &gpu, Pool &tx_pool, Pool &rx_pool,
 				if (!send_op && o.late_receives) link.barrier();
 				if (delayed)
 					usleep(o.rnr_delay_ms * 1000u);
-				if (!early) {
+				if (!early && !send_persistent) {
 					if (!send_op && !o.late_receives) link.recv(barrier_id);
 					post_receives();
 				}
@@ -877,6 +907,10 @@ static void run(Link &link, Rdma &rdma, Gpu &gpu, Pool &tx_pool, Pool &rx_pool,
 				if (result[0])
 					throw std::runtime_error("GPU payload/guard mismatch: " + std::to_string(result[0]));
 				mark(7);
+				if (send_persistent && iteration + 1 < o.iterations) {
+					arm_windows(bytes, generation + count);
+					mark(0);
+				}
 				profile.cpu("cycle", profile_started, profile_phase);
 				if (profile.enabled()) {
 					profile.counter("process_cpu_us", process_cpu_us() - cpu_started);
@@ -959,9 +993,9 @@ int main(int argc, char **argv)
 		    o.rnr_delay_ms > 10000 || o.spin_us > 10000 || !o.depth || o.depth > 3 ||
 		    (!o.host_mr && o.bytes != UINT32_MAX && o.bytes % 32))
 			throw std::runtime_error("option outside test bounds");
-		if (o.persistent_rq && (o.operation != 2 || o.remote_error ||
+		if (o.persistent_rq && (o.operation < 0 || o.operation > 2 || o.remote_error ||
 					o.rnr_delay_ms || o.late_receives))
-			throw std::runtime_error("persistent RQ profiling requires WRITE_IMM without error/delay probes");
+			throw std::runtime_error("persistent RQ profiling requires SEND, SEND_IMM or WRITE_IMM without error/delay probes");
 		setvbuf(stdout, nullptr, _IOLBF, 0);
 		HIP(hipSetDevice(0));
 		TbvProfile profile(o.profile);

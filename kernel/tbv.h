@@ -333,6 +333,7 @@ struct tbv_peer {
 	bool dmabuf_control_dead;
 	bool remote_control_ring;
 	bool remote_push_done;
+	bool remote_dmabuf_credit;
 	u32 native_qp_rr_rail_id;
 	u32 nr_rails;
 	/*

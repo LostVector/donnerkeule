@@ -43,6 +43,33 @@ static bool dmabuf_parallel_post = true;
 module_param(dmabuf_parallel_post, bool, 0444);
 MODULE_PARM_DESC(dmabuf_parallel_post, "Post large descriptor batches concurrently on distinct NHIs");
 
+static bool dmabuf_credits;
+module_param(dmabuf_credits, bool, 0444);
+MODULE_PARM_DESC(dmabuf_credits,
+	"Pre-arm the next GPU SEND receive WQE so the peer can skip PREPARE; requires dmabuf_push_done=1 and dmabuf_control_ring=0");
+
+static uint dmabuf_credit_max = SZ_1M;
+module_param(dmabuf_credit_max, uint, 0444);
+MODULE_PARM_DESC(dmabuf_credit_max, "Largest SEND length a credit pre-arms, in bytes");
+
+enum tbv_dmabuf_credit_counter {
+	CREDIT_GRANTED, CREDIT_COMMITTED, CREDIT_ADOPTED, CREDIT_RELEASED,
+	CREDIT_CANCELED, CREDIT_ABORTED, CREDIT_USED, CREDIT_RETURNED,
+	CREDIT_STALE, CREDIT_MISMATCH, CREDIT_COUNTERS,
+};
+
+static const char * const dmabuf_credit_names[] = {
+	"granted", "committed", "adopted", "released", "canceled", "aborted",
+	"used", "returned", "stale", "mismatch",
+};
+
+static atomic64_t dmabuf_credit_counters[CREDIT_COUNTERS];
+
+static void tbv_dmabuf_credit_count(enum tbv_dmabuf_credit_counter counter)
+{
+	atomic64_inc(&dmabuf_credit_counters[counter]);
+}
+
 enum tbv_dmabuf_phase {
 	TBV_DMABUF_QUEUE,
 	TBV_DMABUF_JOB,
@@ -111,6 +138,11 @@ void tbv_dmabuf_debugfs_show(struct seq_file *s)
 	seq_printf(s, "dmabuf_parallel_post: %u\n", dmabuf_parallel_post);
 	seq_printf(s, "dmabuf_control_ring: %u\n", tbv_control_enabled());
 	seq_printf(s, "dmabuf_push_done: %u\n", tbv_control_push_enabled());
+	seq_printf(s, "dmabuf_credits: %u\n", tbv_dmabuf_credits_enabled());
+	seq_printf(s, "dmabuf_credit_max: %u\n", dmabuf_credit_max);
+	for (i = 0; i < CREDIT_COUNTERS; i++)
+		seq_printf(s, "dmabuf_credit_%s: %lld\n", dmabuf_credit_names[i],
+			   atomic64_read(&dmabuf_credit_counters[i]));
 	if (!dmabuf_profile)
 		return;
 	for (i = 0; i < TBV_DMABUF_PHASE_COUNT; i++) {
@@ -204,36 +236,76 @@ struct tbv_dmabuf_job {
 };
 
 /* OPEN retains the WR between DMA batches; CACHED retains its final result.
- * All transitions and the buffer/control reference are protected by rx_lock. */
+ * SPECULATIVE has armed a credit's pages before its WR is known; last keeps
+ * the previous WR's result for STATUS meanwhile. All transitions and the
+ * buffer/control references are protected by rx_lock. */
 enum tbv_dmabuf_rx_state {
 	TBV_DMABUF_RX_IDLE,
 	TBV_DMABUF_RX_OPEN,
 	TBV_DMABUF_RX_ARMED,
 	TBV_DMABUF_RX_CACHED,
+	TBV_DMABUF_RX_SPECULATIVE,
 };
 
 struct tbv_dmabuf_rx {
 	struct tbv_dmabuf_wire request;
+	struct tbv_dmabuf_wire last;
 	struct tbv_dmabuf_buffer buffer;
 	struct tbv_dmabuf_batch batch;
 	struct tbv_control *control;
+	struct tbv_control *credit_ctrl;
 	unsigned long deadline;
+	unsigned long release_deadline;
 	u32 next_offset;
 	int status;
+	int last_status;
+	/* A committed credit whose WQE was gone: fail it after its DMA. */
+	int deferred;
 	enum tbv_dmabuf_rx_state state;
+	bool last_valid;
+	bool released;
+	bool cancel_sent;
 };
+
+/* A data sender's view of one receiving host's credit. done is the highest
+ * credit this host has committed, released, or seen adopted by a PREPARE;
+ * older notifications are stale. */
+struct tbv_dmabuf_credit {
+	u8 host[16];
+	struct tbv_dmabuf_wire wire;
+	u32 done;
+	bool used;
+	bool valid;
+	bool cancel;
+};
+
+#define TBV_DMABUF_CREDIT_HOSTS 4
 
 /* One ordered TX stream and one RX transaction span all rails/links.
  * ring_lock serializes ring replacement; tx_lock protects cancellation. */
 struct tbv_dmabuf_engine {
 	struct workqueue_struct *tx_wq, *post_wq;
 	struct mutex rx_lock, ring_lock, tx_lock;
+	struct tbv_state *state;
 	void *active_context;
 	struct tbv_dmabuf_batch *active_batch;
 	struct tbv_dmabuf_rx rx;
 	struct delayed_work rx_watchdog;
 	struct work_struct rx_complete_work;
 	atomic64_t token;
+	/* Receiver: the stream to pre-arm once its RQ has a WQE (rx_lock). */
+	struct work_struct credit_work;
+	wait_queue_head_t rx_wait;
+	void *want_owner;
+	struct tbv_dmabuf_wire want;
+	struct tbv_control *want_ctrl;
+	u32 credit_seq;
+	/* Sender: credits granted to this host, released on tx_wq. */
+	struct work_struct settle_work;
+	spinlock_t credit_lock;
+	wait_queue_head_t credit_wait;
+	struct tbv_dmabuf_credit credits[TBV_DMABUF_CREDIT_HOSTS];
+	u32 credit_victim;
 };
 
 static struct tbv_dmabuf_engine dmabuf_engine = {
@@ -241,11 +313,20 @@ static struct tbv_dmabuf_engine dmabuf_engine = {
 	.ring_lock = __MUTEX_INITIALIZER(dmabuf_engine.ring_lock),
 	.tx_lock = __MUTEX_INITIALIZER(dmabuf_engine.tx_lock),
 	.token = ATOMIC64_INIT(0),
+	.rx_wait = __WAIT_QUEUE_HEAD_INITIALIZER(dmabuf_engine.rx_wait),
+	.credit_lock = __SPIN_LOCK_UNLOCKED(dmabuf_engine.credit_lock),
+	.credit_wait = __WAIT_QUEUE_HEAD_INITIALIZER(dmabuf_engine.credit_wait),
 };
 
 static bool tbv_dmabuf_rx_active(const struct tbv_dmabuf_rx *rx)
 {
 	return rx->state == TBV_DMABUF_RX_OPEN || rx->state == TBV_DMABUF_RX_ARMED;
+}
+
+bool tbv_dmabuf_credits_enabled(void)
+{
+	return dmabuf_verbs && dmabuf_credits && tbv_control_push_enabled() &&
+		!tbv_control_enabled();
 }
 
 bool tbv_dmabuf_verbs_enabled(void)
@@ -883,9 +964,16 @@ static void tbv_dmabuf_rx_notify(int status)
 	tbv_control_put(ctrl);
 }
 
+static void tbv_dmabuf_credit_next(struct tbv_control *ctrl);
+static void tbv_dmabuf_spec_cancel(void);
+static void tbv_dmabuf_spec_drop(bool abort);
+static bool tbv_dmabuf_spec_poll(void);
+
 static void tbv_dmabuf_rx_finish(int status)
 {
 	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+	struct tbv_control *ctrl = rx->control;
+	bool gpu = rx->buffer.mr;
 	u64 start;
 
 	tbv_dmabuf_batch_drop(&rx->batch, !!status);
@@ -898,15 +986,48 @@ static void tbv_dmabuf_rx_finish(int status)
 	memset(&rx->buffer, 0, sizeof(rx->buffer));
 	rx->state = TBV_DMABUF_RX_CACHED;
 	rx->status = status;
+	rx->deferred = 0;
+	rx->last = rx->request;
+	rx->last_status = status;
+	rx->last_valid = true;
+	if (ctrl)
+		tbv_control_get(ctrl);
 	tbv_dmabuf_rx_notify(status ?: TBV_DMABUF_DONE);
+	/* After DONE, so the credit never delays this WR's completion. */
+	if (!status && gpu)
+		tbv_dmabuf_credit_next(ctrl);
+	tbv_control_put(ctrl);
+}
+
+static void tbv_dmabuf_want_clear(void)
+{
+	dmabuf_engine.want_owner = NULL;
+	tbv_control_put(dmabuf_engine.want_ctrl);
+	dmabuf_engine.want_ctrl = NULL;
 }
 
 void tbv_dmabuf_cancel_recv(void *owner)
 {
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+
 	if (!dmabuf_verbs)
 		return;
 	mutex_lock(&dmabuf_engine.rx_lock);
-	if (tbv_dmabuf_rx_active(&dmabuf_engine.rx) && dmabuf_engine.rx.buffer.owner == owner)
+	if (dmabuf_engine.want_owner == owner)
+		tbv_dmabuf_want_clear();
+	if (rx->state == TBV_DMABUF_RX_SPECULATIVE && rx->buffer.owner == owner) {
+		/* Its pages are armed: the peer must fill them before the rings
+		 * can be reused. Without that, quarantine the rails as on abort. */
+		tbv_dmabuf_spec_cancel();
+		mutex_unlock(&dmabuf_engine.rx_lock);
+		wait_event_timeout(dmabuf_engine.rx_wait,
+			READ_ONCE(rx->state) != TBV_DMABUF_RX_SPECULATIVE ||
+			READ_ONCE(rx->buffer.owner) != owner, msecs_to_jiffies(600));
+		mutex_lock(&dmabuf_engine.rx_lock);
+		if (rx->state == TBV_DMABUF_RX_SPECULATIVE && rx->buffer.owner == owner)
+			tbv_dmabuf_spec_drop(true);
+	}
+	if (tbv_dmabuf_rx_active(rx) && rx->buffer.owner == owner)
 		tbv_dmabuf_rx_finish(-ECANCELED);
 	mutex_unlock(&dmabuf_engine.rx_lock);
 }
@@ -924,6 +1045,9 @@ static int tbv_dmabuf_rx_reap_impl(void)
 	if (atomic_read(&rx->batch.pending))
 		return TBV_DMABUF_BUSY;
 	dma_rmb();
+	ret = rx->deferred;
+	if (ret)
+		goto fail;
 	if (!rx->buffer.mr) {
 		for (i = 0; i < rx->batch.count; i++) {
 			struct tbv_dmabuf_lane *lane = &rx->batch.lanes[i];
@@ -974,6 +1098,8 @@ static void tbv_dmabuf_rx_completed(struct work_struct *work)
 		READ_ONCE(dmabuf_engine.rx.batch.perf_dma_done_ns), start, 0, 0);
 	if (tbv_dmabuf_rx_active(&dmabuf_engine.rx) && dmabuf_engine.rx.state == TBV_DMABUF_RX_ARMED)
 		tbv_dmabuf_rx_reap();
+	else if (dmabuf_engine.rx.state == TBV_DMABUF_RX_SPECULATIVE)
+		tbv_dmabuf_spec_poll();
 	mutex_unlock(&dmabuf_engine.rx_lock);
 }
 
@@ -1005,8 +1131,331 @@ out:
 	return found;
 }
 
+/* Whether a WR may use a credit: the same receiving QP, the PSN armed for
+ * it, the exact armed length and the same wire lanes. Neither side can
+ * redirect frames once descriptors are posted, so nothing else can match. */
+static bool tbv_dmabuf_credit_match(const struct tbv_dmabuf_wire *credit,
+				    const struct tbv_dmabuf_wire *m)
+{
+	return (m->hdr.opcode == TBV_NATIVE_DATA_OP_SEND ||
+		m->hdr.opcode == TBV_NATIVE_DATA_OP_SEND_IMM) &&
+		!memcmp(credit->src_host, m->src_host, 16) &&
+		!memcmp(credit->dst_host, m->dst_host, 16) &&
+		m->hdr.src_qp == credit->hdr.src_qp &&
+		m->hdr.dest_qp == credit->hdr.dest_qp &&
+		m->hdr.psn == credit->hdr.psn &&
+		m->hdr.length == credit->hdr.length && !m->offset &&
+		m->bytes == credit->bytes && m->count == credit->count &&
+		!memcmp(m->lanes, credit->lanes, sizeof(m->lanes));
+}
+
+/* Replay watermark for a new WR from the sending host (state->lock). */
+static bool tbv_dmabuf_token_fresh(struct tbv_state *state,
+				   const struct tbv_dmabuf_wire *m, bool update)
+{
+	struct tbv_peer *peer;
+	bool fresh = true;
+
+	mutex_lock(&state->lock);
+	list_for_each_entry(peer, &state->peers, node) {
+		if (!peer->remote_host_known ||
+		    memcmp(peer->remote_host_id, m->src_host, 16))
+			continue;
+		if (m->token <= peer->dmabuf_rx_token)
+			fresh = false;
+		else if (update)
+			peer->dmabuf_rx_token = m->token;
+	}
+	mutex_unlock(&state->lock);
+	return fresh;
+}
+
+/* Turn the armed credit into the WR that arrived for it. */
+static void tbv_dmabuf_spec_adopt(const struct tbv_dmabuf_wire *m, int deferred)
+{
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+
+	tbv_dmabuf_token_fresh(dmabuf_engine.state, m, true);
+	rx->request = *m;
+	rx->request.op = TBV_DMABUF_PREPARE;
+	rx->request.credit = 0;
+	rx->request.status = 0;
+	rx->deferred = deferred;
+	rx->next_offset = 0;
+	rx->deadline = jiffies + msecs_to_jiffies(30000);
+	tbv_control_put(rx->credit_ctrl);
+	rx->credit_ctrl = NULL;
+	rx->state = TBV_DMABUF_RX_ARMED;
+	wake_up_all(&dmabuf_engine.rx_wait);
+}
+
+static void tbv_dmabuf_spec_drop(bool abort)
+{
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+
+	tbv_dmabuf_batch_drop(&rx->batch, abort);
+	if (rx->buffer.finish)
+		rx->buffer.finish(rx->buffer.context, -ECANCELED);
+	memset(&rx->buffer, 0, sizeof(rx->buffer));
+	tbv_control_put(rx->credit_ctrl);
+	rx->credit_ctrl = NULL;
+	rx->request = rx->last;
+	rx->state = rx->last_valid ? TBV_DMABUF_RX_CACHED : TBV_DMABUF_RX_IDLE;
+	tbv_dmabuf_credit_count(abort ? CREDIT_ABORTED : CREDIT_RELEASED);
+	wake_up_all(&dmabuf_engine.rx_wait);
+}
+
+/* Ask the sender to fill the armed pages; it acknowledges with RELEASE. */
+static void tbv_dmabuf_spec_cancel(void)
+{
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+	struct tbv_dmabuf_wire m = rx->request;
+
+	if (rx->cancel_sent || rx->released)
+		return;
+	rx->cancel_sent = true;
+	rx->release_deadline = jiffies + msecs_to_jiffies(500);
+	m.op = TBV_DMABUF_CREDIT | TBV_DMABUF_REPLY;
+	m.status = -ECANCELED;
+	tbv_dmabuf_credit_count(CREDIT_CANCELED);
+	if (tbv_control_notify(rx->credit_ctrl, &m)) {
+		tbv_dmabuf_spec_drop(true);
+		return;
+	}
+	mod_delayed_work(system_unbound_wq, &dmabuf_engine.rx_watchdog,
+			 msecs_to_jiffies(10));
+}
+
+/* Returns true while the credit is still armed and unresolved. */
+static bool tbv_dmabuf_spec_poll(void)
+{
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+
+	if (rx->state != TBV_DMABUF_RX_SPECULATIVE)
+		return false;
+	if (atomic_read(&rx->batch.error)) {
+		tbv_dmabuf_spec_drop(true);
+		return false;
+	}
+	if (rx->released && !atomic_read(&rx->batch.pending)) {
+		dma_rmb();
+		tbv_dmabuf_spec_drop(false);
+		return false;
+	}
+	if (!rx->buffer.alive(rx->buffer.context))
+		tbv_dmabuf_spec_cancel();
+	if (rx->state == TBV_DMABUF_RX_SPECULATIVE && rx->cancel_sent &&
+	    time_after_eq(jiffies, rx->release_deadline))
+		tbv_dmabuf_spec_drop(true);
+	return rx->state == TBV_DMABUF_RX_SPECULATIVE;
+}
+
+/* Arm the remembered stream's head WQE and grant its sender a credit. */
+static void tbv_dmabuf_credit_arm(void)
+{
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+	struct tbv_dmabuf_wire m = dmabuf_engine.want;
+	struct tbv_control *ctrl = dmabuf_engine.want_ctrl;
+	struct tbv_dmabuf_buffer buffer = {};
+	u64 perf_start = tbv_perf_clock();
+	u32 i, j;
+	int ret;
+
+	if (!ctrl || tbv_dmabuf_rx_active(rx) ||
+	    rx->state == TBV_DMABUF_RX_SPECULATIVE)
+		return;
+	if (!tbv_control_credits(ctrl)) {
+		tbv_dmabuf_want_clear();
+		return;
+	}
+	memset(&rx->batch, 0, sizeof(rx->batch));
+	for (i = 0; i < m.count; i++) {
+		struct tbv_rail *rail = tbv_dmabuf_find_lane(dmabuf_engine.state, &m, i);
+
+		if (!rail)
+			goto forget;
+		for (j = 0; j < i; j++)
+			if (rx->batch.lanes[j].rail == rail)
+				break;
+		rx->batch.lanes[rx->batch.count++].rail = rail;
+		if (j != i)
+			goto forget;
+	}
+	m.hdr.imm_data = 0;
+	ret = tbv_ibdev_dmabuf_peek(dmabuf_engine.state, rx->batch.lanes[0].rail,
+				   &m.hdr, &buffer);
+	if (ret == -EAGAIN) {
+		/* Retried from post_recv. Drop lanes; the stream stays wanted. */
+		dmabuf_engine.want_owner = buffer.owner;
+		tbv_dmabuf_batch_drop(&rx->batch, false);
+		return;
+	}
+	if (ret)
+		goto forget;
+	if (!++dmabuf_engine.credit_seq)
+		dmabuf_engine.credit_seq++;
+	m.op = TBV_DMABUF_CREDIT;
+	m.credit = dmabuf_engine.credit_seq;
+	m.status = 0;
+	rx->request = m;
+	rx->buffer = buffer;
+	ret = tbv_dmabuf_batch_alloc(&rx->batch, &m, &rx->buffer, false);
+	if (!ret)
+		ret = tbv_dmabuf_batch_post(&rx->batch, false);
+	rx->state = TBV_DMABUF_RX_SPECULATIVE;
+	rx->released = false;
+	rx->cancel_sent = false;
+	rx->credit_ctrl = ctrl;
+	dmabuf_engine.want_ctrl = NULL;
+	dmabuf_engine.want_owner = NULL;
+	if (ret) {
+		tbv_dmabuf_spec_drop(true);
+		return;
+	}
+	m.op = TBV_DMABUF_CREDIT | TBV_DMABUF_REPLY;
+	ret = tbv_control_notify(ctrl, &m);
+	tbv_perf_wire(&m, false, "credit_grant", perf_start, ret, m.credit);
+	if (ret) {
+		/* Nobody can fill descriptors the sender does not know about. */
+		tbv_dmabuf_spec_drop(true);
+		return;
+	}
+	tbv_dmabuf_credit_count(CREDIT_GRANTED);
+	mod_delayed_work(system_unbound_wq, &dmabuf_engine.rx_watchdog,
+			 msecs_to_jiffies(100));
+	return;
+forget:
+	tbv_dmabuf_batch_drop(&rx->batch, false);
+	tbv_dmabuf_want_clear();
+}
+
+/* After a GPU SEND completed, expect the next one of the same length. */
+static void tbv_dmabuf_credit_next(struct tbv_control *ctrl)
+{
+	const struct tbv_dmabuf_wire *m = &dmabuf_engine.rx.last;
+
+	if (!tbv_control_credits(ctrl) ||
+	    (m->hdr.opcode != TBV_NATIVE_DATA_OP_SEND &&
+	     m->hdr.opcode != TBV_NATIVE_DATA_OP_SEND_IMM) ||
+	    !m->hdr.length || m->offset || m->bytes != m->hdr.length ||
+	    m->hdr.length > dmabuf_credit_max)
+		return;
+	tbv_dmabuf_want_clear();
+	dmabuf_engine.want = *m;
+	tbv_control_get(ctrl);
+	dmabuf_engine.want_ctrl = ctrl;
+	tbv_dmabuf_credit_arm();
+}
+
+static void tbv_dmabuf_credit_work(struct work_struct *work)
+{
+	mutex_lock(&dmabuf_engine.rx_lock);
+	if (dmabuf_engine.want_owner)
+		tbv_dmabuf_credit_arm();
+	mutex_unlock(&dmabuf_engine.rx_lock);
+}
+
+/* Called from ibv_post_recv(). Not on this CPU's queue: the poster often
+ * spins on its CQ next, which delays a per-CPU worker by a time slice. */
+void tbv_dmabuf_recv_posted(void *owner)
+{
+	if (dmabuf_credits && dmabuf_engine.post_wq &&
+	    READ_ONCE(dmabuf_engine.want_owner) == owner)
+		queue_work(dmabuf_engine.post_wq, &dmabuf_engine.credit_work);
+}
+
+/* COMMIT or RELEASE from the data sender for the armed credit. Its frames
+ * are already on the way: a credit we do not hold quarantines the lanes. */
+static void tbv_dmabuf_credit_commit(struct tbv_peer *peer,
+				     const struct tbv_dmabuf_wire *m)
+{
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+	struct tbv_control *ctrl = READ_ONCE(peer->dmabuf_control);
+	bool release = m->op == (TBV_DMABUF_RELEASE | TBV_DMABUF_REPLY);
+	u64 perf_start = tbv_perf_clock();
+	int ret = 0;
+	u32 i;
+
+	mutex_lock(&dmabuf_engine.rx_lock);
+	if (rx->state != TBV_DMABUF_RX_SPECULATIVE || rx->released ||
+	    rx->request.credit != m->credit ||
+	    (!release && (!tbv_dmabuf_credit_match(&rx->request, m) ||
+			  !tbv_dmabuf_token_fresh(peer->state, m, false)))) {
+		pr_warn_ratelimited("unexpected credit %s %u (armed %u state %d), stopping its rails\n",
+				    release ? "release" : "commit", m->credit,
+				    rx->state == TBV_DMABUF_RX_SPECULATIVE ? rx->request.credit : 0,
+				    rx->state);
+		tbv_dmabuf_credit_count(CREDIT_MISMATCH);
+		for (i = 0; i < m->count; i++) {
+			struct tbv_rail *rail = tbv_dmabuf_find_lane(peer->state, m, i);
+
+			if (rail) {
+				tbv_dmabuf_stop_rail(rail);
+				tbv_rail_put(rail);
+			}
+		}
+		if (rx->state == TBV_DMABUF_RX_SPECULATIVE)
+			tbv_dmabuf_spec_drop(true);
+		goto out;
+	}
+	if (release) {
+		rx->released = true;
+		tbv_dmabuf_spec_poll();
+		goto out;
+	}
+	ret = tbv_ibdev_dmabuf_claim(&rx->buffer, &m->hdr);
+	tbv_dmabuf_spec_adopt(m, ret);
+	if (ctrl)
+		tbv_control_get(ctrl);
+	rx->control = ctrl;
+	tbv_dmabuf_credit_count(CREDIT_COMMITTED);
+	if (!atomic_read(&rx->batch.pending) || atomic_read(&rx->batch.error))
+		tbv_dmabuf_rx_reap();
+	else
+		mod_delayed_work(system_unbound_wq, &dmabuf_engine.rx_watchdog,
+				 msecs_to_jiffies(10));
+out:
+	mutex_unlock(&dmabuf_engine.rx_lock);
+	tbv_perf_wire(m, false, release ? "credit_release_rx" : "credit_commit_rx",
+		      perf_start, ret, m->credit);
+}
+
+/* The PREPARE matches the armed credit: a credit was in flight when its
+ * sender started. READY names the credit, so the sender drops it. */
+static int tbv_dmabuf_spec_prepare(struct tbv_state *state,
+				   struct tbv_dmabuf_wire *m)
+{
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+	u32 credit = rx->request.credit;
+
+	if (rx->released) {
+		/* The filler frames follow RELEASE closely; settle in place. */
+		wait_event_timeout(rx->batch.wait, !atomic_read(&rx->batch.pending) ||
+				   atomic_read(&rx->batch.error), msecs_to_jiffies(2));
+		return tbv_dmabuf_spec_poll() ? TBV_DMABUF_BUSY : 0;
+	}
+	if (rx->cancel_sent || !tbv_dmabuf_credit_match(&rx->request, m) ||
+	    !tbv_dmabuf_token_fresh(state, m, false) ||
+	    tbv_ibdev_dmabuf_claim(&rx->buffer, &m->hdr)) {
+		tbv_dmabuf_spec_cancel();
+		return TBV_DMABUF_BUSY;
+	}
+	tbv_dmabuf_spec_adopt(m, 0);
+	m->credit = credit;
+	tbv_dmabuf_credit_count(CREDIT_ADOPTED);
+	return TBV_DMABUF_READY;
+}
+
+static bool tbv_dmabuf_rx_cached(const struct tbv_dmabuf_wire *m)
+{
+	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
+
+	return !tbv_dmabuf_rx_active(rx) && rx->last_valid &&
+		tbv_dmabuf_same(&rx->last, m, true);
+}
+
 static int tbv_dmabuf_rx_prepare(struct tbv_state *state,
-				 const struct tbv_dmabuf_wire *m)
+				 struct tbv_dmabuf_wire *m)
 {
 	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
 	u64 start;
@@ -1014,8 +1463,16 @@ static int tbv_dmabuf_rx_prepare(struct tbv_state *state,
 	u32 i, j;
 	int ret;
 
-	if (rx->state == TBV_DMABUF_RX_CACHED && tbv_dmabuf_same(&rx->request, m, true))
-		return rx->status ?: TBV_DMABUF_DONE;
+	if (tbv_dmabuf_rx_cached(m))
+		return rx->last_status ?: TBV_DMABUF_DONE;
+	if (rx->state == TBV_DMABUF_RX_SPECULATIVE) {
+		ret = m->offset ? TBV_DMABUF_BUSY : tbv_dmabuf_spec_prepare(state, m);
+		if (ret == TBV_DMABUF_BUSY && m->offset)
+			tbv_dmabuf_spec_cancel();
+		if (ret)
+			return ret;
+	}
+	rx->deferred = 0;
 	if (tbv_dmabuf_rx_active(rx)) {
 		if (!tbv_dmabuf_same(&rx->request, m, false))
 			return TBV_DMABUF_BUSY;
@@ -1126,6 +1583,15 @@ static void tbv_dmabuf_rx_watch(struct work_struct *work)
 		if (tbv_dmabuf_rx_active(rx))
 			mod_delayed_work(system_unbound_wq, &dmabuf_engine.rx_watchdog,
 					 msecs_to_jiffies(10));
+	} else if (tbv_dmabuf_spec_poll()) {
+		/* An armed credit waits for its WR indefinitely; only a
+		 * release in progress needs prompt ring progress. */
+		bool settling = rx->released || rx->cancel_sent;
+
+		if (settling)
+			tbv_dmabuf_batch_kick(&rx->batch, false);
+		mod_delayed_work(system_unbound_wq, &dmabuf_engine.rx_watchdog,
+				 msecs_to_jiffies(settling ? 10 : 100));
 	}
 	mutex_unlock(&dmabuf_engine.rx_lock);
 }
@@ -1159,21 +1625,52 @@ int tbv_dmabuf_control_request(struct tbv_peer *peer, struct tbv_control *ctrl,
 			if (!atomic_read(&dmabuf_engine.rx.batch.pending))
 				m->status = tbv_dmabuf_rx_reap();
 		}
-	} else if (m->op == TBV_DMABUF_COMPLETE ||
+	} else if (m->op == TBV_DMABUF_COMPLETE || tbv_dmabuf_credit_op(m->op)) {
+		m->status = -ENOENT;
+	} else if (tbv_dmabuf_rx_cached(m)) {
+		m->status = m->op == TBV_DMABUF_ABORT ? -ECANCELED :
+			    dmabuf_engine.rx.last_status ?: TBV_DMABUF_DONE;
+	} else if (!tbv_dmabuf_rx_active(&dmabuf_engine.rx) ||
 		   !tbv_dmabuf_same(&dmabuf_engine.rx.request, m, true)) {
 		m->status = -ENOENT;
 	} else if (m->op == TBV_DMABUF_ABORT) {
-		if (tbv_dmabuf_rx_active(&dmabuf_engine.rx))
-			tbv_dmabuf_rx_finish(-ECANCELED);
+		tbv_dmabuf_rx_finish(-ECANCELED);
 		m->status = -ECANCELED;
-	} else if (dmabuf_engine.rx.state == TBV_DMABUF_RX_CACHED) {
-		m->status = dmabuf_engine.rx.status ?: TBV_DMABUF_DONE;
 	} else {
 		m->status = tbv_dmabuf_rx_reap();
 	}
 	mutex_unlock(&dmabuf_engine.rx_lock);
 	tbv_perf_wire(m, false, "control_service", service, m->status, m->op);
 	return m->status;
+}
+
+/* COMMIT/RELEASE arrive at the data receiver, oriented like a PREPARE. */
+static void tbv_dmabuf_credit_notified(struct tbv_state *state,
+				       struct tb_xdomain *source,
+				       const struct tbv_dmabuf_wire *m)
+{
+	struct tbv_peer *peer, *found = NULL;
+
+	if (m->status || memcmp(m->dst_host, state->native_host_id, 16))
+		return;
+	mutex_lock(&state->lock);
+	list_for_each_entry(peer, &state->peers, node) {
+		if ((source && peer->xd != source) ||
+		    peer->backend != TBV_BACKEND_NATIVE ||
+		    !peer->remote_host_known || !peer->xd->remote_uuid ||
+		    memcmp(peer->remote_host_id, m->src_host, 16) ||
+		    memcmp(peer->xd->remote_uuid, m->src_domain, 16))
+			continue;
+		refcount_inc(&peer->refcnt);
+		found = peer;
+		break;
+	}
+	mutex_unlock(&state->lock);
+	if (!found)
+		return;
+	if (tbv_control_credits(READ_ONCE(found->dmabuf_control)))
+		tbv_dmabuf_credit_commit(found, m);
+	tbv_peer_put(state, found);
 }
 
 int tbv_dmabuf_handle_packet(struct tbv_state *state,
@@ -1190,9 +1687,16 @@ int tbv_dmabuf_handle_packet(struct tbv_state *state,
 	/* Consume DONE before core matching, including malformed, late, or
 	 * disabled-mode notifications. Only fully validated replies wake TX. */
 	if (tbv_dmabuf_wire_notification(buf, size)) {
-		if (dmabuf_verbs && !tbv_dmabuf_wire_parse(buf, size, &m) &&
-		    m.op == (TBV_DMABUF_COMPLETE | TBV_DMABUF_REPLY))
+		if (!dmabuf_verbs || tbv_dmabuf_wire_parse(buf, size, &m))
+			return 1;
+		if (m.op == (TBV_DMABUF_COMPLETE | TBV_DMABUF_REPLY) ||
+		    m.op == (TBV_DMABUF_CREDIT | TBV_DMABUF_REPLY))
 			tbv_control_handle_done(state, source, &m);
+		else if (m.op == (TBV_DMABUF_COMMIT | TBV_DMABUF_REPLY) ||
+			 m.op == (TBV_DMABUF_RELEASE | TBV_DMABUF_REPLY))
+			tbv_dmabuf_credit_notified(state, source, &m);
+		else
+			tbv_dmabuf_credit_count(CREDIT_MISMATCH);
 		return 1;
 	}
 	if (!dmabuf_verbs)
@@ -1306,6 +1810,223 @@ static int tbv_dmabuf_tx_paths(struct tbv_dmabuf_job *job,
 	return batch->count ? 0 : -ENOTCONN;
 }
 
+/* Sender side. Credits arrive on any link to the receiving host; done
+ * guards against duplicates, credits seen adopted, and stale cancels. */
+static struct tbv_dmabuf_credit *tbv_dmabuf_credit_slot(const u8 *host, bool create)
+{
+	struct tbv_dmabuf_credit *c;
+	u32 i;
+
+	lockdep_assert_held(&dmabuf_engine.credit_lock);
+	for (i = 0; i < TBV_DMABUF_CREDIT_HOSTS; i++) {
+		c = &dmabuf_engine.credits[i];
+		if (c->used && !memcmp(c->host, host, 16))
+			return c;
+	}
+	if (!create)
+		return NULL;
+	for (i = 0; i < TBV_DMABUF_CREDIT_HOSTS; i++)
+		if (!dmabuf_engine.credits[i].used)
+			break;
+	if (i == TBV_DMABUF_CREDIT_HOSTS)
+		i = dmabuf_engine.credit_victim++ % TBV_DMABUF_CREDIT_HOSTS;
+	c = &dmabuf_engine.credits[i];
+	memset(c, 0, sizeof(*c));
+	memcpy(c->host, host, 16);
+	c->used = true;
+	return c;
+}
+
+void tbv_dmabuf_credit_received(struct tbv_peer *peer,
+				const struct tbv_dmabuf_wire *m)
+{
+	struct tbv_dmabuf_credit *c;
+	unsigned long flags;
+	bool settle = false;
+
+	if (!tbv_dmabuf_credits_enabled() || !READ_ONCE(peer->remote_dmabuf_credit))
+		return;
+	spin_lock_irqsave(&dmabuf_engine.credit_lock, flags);
+	c = tbv_dmabuf_credit_slot(m->dst_host, true);
+	if (m->credit <= c->done) {
+		tbv_dmabuf_credit_count(CREDIT_STALE);
+	} else {
+		if (!c->valid || c->wire.credit < m->credit) {
+			c->wire = *m;
+			c->wire.status = 0;
+			c->valid = true;
+			c->cancel = false;
+		}
+		if (m->status < 0 && c->wire.credit == m->credit) {
+			c->cancel = true;
+			settle = true;
+		}
+	}
+	spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
+	tbv_perf_wire_mark(m, true, "credit_received", m->status, m->credit);
+	wake_up_all(&dmabuf_engine.credit_wait);
+	if (settle && dmabuf_engine.tx_wq)
+		queue_work(dmabuf_engine.tx_wq, &dmabuf_engine.settle_work);
+}
+
+static bool tbv_dmabuf_credit_held(const u8 *host)
+{
+	struct tbv_dmabuf_credit *c;
+	unsigned long flags;
+	bool held;
+
+	spin_lock_irqsave(&dmabuf_engine.credit_lock, flags);
+	c = tbv_dmabuf_credit_slot(host, false);
+	held = c && c->valid;
+	spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
+	return held;
+}
+
+/* READY adopted this credit for the PREPARE that raced it. */
+static void tbv_dmabuf_credit_adopted(const u8 *host, u32 credit)
+{
+	struct tbv_dmabuf_credit *c;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dmabuf_engine.credit_lock, flags);
+	c = tbv_dmabuf_credit_slot(host, true);
+	c->done = max(c->done, credit);
+	if (c->valid && c->wire.credit <= credit)
+		c->valid = false;
+	spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
+}
+
+static int tbv_dmabuf_zero_copy(void *context, u32 offset, void *data,
+				u32 bytes, bool to_mr)
+{
+	memset(data, 0, bytes);
+	return 0;
+}
+
+static bool tbv_dmabuf_always_alive(void *context)
+{
+	return true;
+}
+
+/* Fill an unusable credit's armed pages, which the receiver still owns as
+ * a posted WQE, with exactly the frames it expects; then say RELEASE. */
+static void tbv_dmabuf_credit_release(struct tbv_state *state,
+				      const struct tbv_dmabuf_wire *credit)
+{
+	struct tbv_dmabuf_wire m = *credit;
+	struct tbv_dmabuf_batch batch = {};
+	struct tbv_dmabuf_buffer buffer = {
+		.copy = tbv_dmabuf_zero_copy,
+		.alive = tbv_dmabuf_always_alive,
+	};
+	struct tbv_control *ctrl = NULL;
+	struct tbv_peer *peer;
+	u64 perf_start = tbv_perf_clock();
+	u32 i;
+	int ret = 0;
+
+	mutex_lock(&state->lock);
+	for (i = 0; i < m.count && !ret; i++) {
+		struct tbv_rail *found = NULL;
+
+		list_for_each_entry(peer, &state->peers, node) {
+			struct tbv_rail *rail;
+
+			if (!peer->remote_host_known || !peer->xd->local_uuid ||
+			    memcmp(peer->remote_host_id, m.dst_host, 16) ||
+			    memcmp(peer->xd->local_uuid, m.lanes[i].domain, 16))
+				continue;
+			list_for_each_entry(rail, &peer->rails, node)
+				if (tbv_dmabuf_rail_ready(rail) &&
+				    rail->path.local_transmit_path == m.lanes[i].path)
+					found = rail;
+		}
+		if (found) {
+			refcount_inc(&found->refcnt);
+			batch.lanes[batch.count++].rail = found;
+		} else {
+			ret = -ENOTCONN;
+		}
+	}
+	list_for_each_entry(peer, &state->peers, node)
+		if (!ctrl && peer->remote_host_known && peer->xd->local_uuid &&
+		    !memcmp(peer->remote_host_id, m.dst_host, 16) &&
+		    !memcmp(peer->xd->local_uuid, m.src_domain, 16) &&
+		    tbv_control_credits(READ_ONCE(peer->dmabuf_control))) {
+			ctrl = READ_ONCE(peer->dmabuf_control);
+			tbv_control_get(ctrl);
+		}
+	mutex_unlock(&state->lock);
+	if (!ret && !ctrl)
+		ret = -ENOTCONN;
+	if (!ret)
+		ret = tbv_dmabuf_batch_alloc(&batch, &m, &buffer, true);
+	if (!ret) {
+		dma_wmb();
+		ret = tbv_dmabuf_batch_post(&batch, true);
+	}
+	if (!ret)
+		ret = tbv_dmabuf_batch_wait(&batch, &buffer,
+					    jiffies + msecs_to_jiffies(1000));
+	if (!ret) {
+		m.op = TBV_DMABUF_RELEASE | TBV_DMABUF_REPLY;
+		m.status = 0;
+		ret = tbv_control_notify(ctrl, &m);
+	}
+	/* Without RELEASE the receiver quarantines its rails after 500 ms. */
+	tbv_dmabuf_batch_drop(&batch, ret && batch.submitted);
+	tbv_control_put(ctrl);
+	tbv_dmabuf_credit_count(CREDIT_RETURNED);
+	tbv_perf_wire(&m, true, "credit_release", perf_start, ret, m.credit);
+	if (ret)
+		pr_warn_ratelimited("credit %u release failed: %d\n", m.credit, ret);
+}
+
+/*
+ * Runs on the ordered TX queue only. Returns the credit this WR may use
+ * (m NULL: none), after filling any other credit held for its host.
+ */
+static u32 tbv_dmabuf_credit_settle(struct tbv_state *state, const u8 *host,
+				    const struct tbv_dmabuf_wire *m)
+{
+	struct tbv_dmabuf_credit *c;
+	struct tbv_dmabuf_wire credit;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dmabuf_engine.credit_lock, flags);
+	c = tbv_dmabuf_credit_slot(host, false);
+	if (!c || !c->valid) {
+		spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
+		return 0;
+	}
+	credit = c->wire;
+	c->valid = false;
+	c->done = max(c->done, credit.credit);
+	if (m && !c->cancel && tbv_dmabuf_credit_match(&credit, m)) {
+		spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
+		tbv_dmabuf_credit_count(CREDIT_USED);
+		return credit.credit;
+	}
+	spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
+	tbv_dmabuf_credit_release(state, &credit);
+	return 0;
+}
+
+static void tbv_dmabuf_settle_work(struct work_struct *work)
+{
+	u8 hosts[TBV_DMABUF_CREDIT_HOSTS][16];
+	unsigned long flags;
+	u32 i, n = 0;
+
+	spin_lock_irqsave(&dmabuf_engine.credit_lock, flags);
+	for (i = 0; i < TBV_DMABUF_CREDIT_HOSTS; i++)
+		if (dmabuf_engine.credits[i].valid && dmabuf_engine.credits[i].cancel)
+			memcpy(hosts[n++], dmabuf_engine.credits[i].host, 16);
+	spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
+	for (i = 0; i < n; i++)
+		tbv_dmabuf_credit_settle(dmabuf_engine.state, hosts[i], NULL);
+}
+
 static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 {
 	struct tbv_dmabuf_wire m = {};
@@ -1313,6 +2034,9 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 	struct tbv_peer *peer = job->route->peer;
 	struct tbv_ctrl_pending *pending = NULL;
 	bool fast = tbv_control_required(peer);
+	bool credits = fast && tbv_dmabuf_credits_enabled() &&
+		READ_ONCE(peer->remote_dmabuf_credit) &&
+		tbv_control_xdomain_required(peer);
 	u32 offset = 0;
 	int ret = 0;
 
@@ -1333,7 +2057,7 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 		u64 start;
 		u64 perf_start, batch_start = tbv_perf_clock();
 		unsigned long deadline = jiffies + job->timeout * (job->retries + 1);
-		u32 rnr = 0, failures = 0;
+		u32 rnr = 0, failures = 0, credit = 0;
 		bool remote_armed = false;
 
 		memset(m.lanes, 0, sizeof(m.lanes));
@@ -1356,6 +2080,11 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 		mutex_unlock(&dmabuf_engine.tx_lock);
 		if (ret)
 			goto drop;
+		/* Fill any credit this WR cannot use before PREPARE can reach
+		 * the receiver; a matching one replaces the PREPARE exchange. */
+		if (credits)
+			credit = tbv_dmabuf_credit_settle(job->state, m.dst_host,
+							  offset ? NULL : &m);
 		m.op = TBV_DMABUF_PREPARE;
 		if (fast) {
 			pending = tbv_control_open(peer, &m);
@@ -1366,6 +2095,21 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 			}
 		}
 		for (;;) {
+			if (credit) {
+				/* DONE is registered first; frames may precede COMMIT. */
+				m.op = TBV_DMABUF_COMMIT | TBV_DMABUF_REPLY;
+				m.credit = credit;
+				perf_start = tbv_perf_clock();
+				ret = tbv_control_notify(tbv_control_of(pending), &m);
+				tbv_perf_wire(&m, true, "credit_commit", perf_start, ret, credit);
+				m.op = TBV_DMABUF_PREPARE;
+				m.credit = 0;
+				if (ret)
+					goto drop;
+				ret = TBV_DMABUF_READY;
+				remote_armed = true;
+				break;
+			}
 			if (!job->buffer.alive(job->buffer.context)) {
 				ret = -ECANCELED;
 				break;
@@ -1373,8 +2117,18 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 			ret = tbv_dmabuf_exchange(peer, pending, &m,
 				clamp_t(u32, jiffies_to_msecs(job->timeout), 10, 1000));
 			if (ret == TBV_DMABUF_READY) {
+				if (tbv_control_reply_credit(pending))
+					tbv_dmabuf_credit_adopted(m.dst_host,
+						tbv_control_reply_credit(pending));
 				remote_armed = true;
 				break;
+			}
+			/* The receiver holds a credit for us: use or fill it. */
+			if (ret == TBV_DMABUF_BUSY && credits) {
+				credit = tbv_dmabuf_credit_settle(job->state, m.dst_host,
+								  offset ? NULL : &m);
+				if (credit)
+					continue;
 			}
 			if (ret == TBV_DMABUF_DONE)
 				break;
@@ -1394,6 +2148,18 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 			}
 			start = tbv_dmabuf_clock();
 			perf_start = tbv_perf_clock();
+			if (ret == TBV_DMABUF_RNR && credits && !offset) {
+				/* The receiver grants a credit once it posts the WQE
+				 * this SEND needs: wait for that instead of polling. */
+				wait_event_timeout(dmabuf_engine.credit_wait,
+					tbv_dmabuf_credit_held(m.dst_host), msecs_to_jiffies(2));
+				tbv_dmabuf_record(TBV_DMABUF_RNR_WAIT, start);
+				tbv_perf_wire(&m, true, "rnr_credit_wait", perf_start, ret, rnr);
+				credit = tbv_dmabuf_credit_settle(job->state, m.dst_host, &m);
+				if (credit)
+					rnr--;
+				continue;
+			}
 			usleep_range(1000, 2000);
 			tbv_dmabuf_record(ret == TBV_DMABUF_RNR ? TBV_DMABUF_RNR_WAIT :
 				TBV_DMABUF_PREPARE_WAIT, start);
@@ -1562,13 +2328,18 @@ void tbv_dmabuf_disconnect(struct tbv_rail *rail)
 	if (!dmabuf_verbs)
 		return;
 	mutex_lock(&dmabuf_engine.rx_lock);
-	if (tbv_dmabuf_rx_active(rx)) {
+	if (tbv_dmabuf_rx_active(rx) || rx->state == TBV_DMABUF_RX_SPECULATIVE) {
 		for (i = 0; i < rx->batch.count; i++)
 			if (rx->batch.lanes[i].rail == rail) {
-				tbv_dmabuf_rx_finish(-ENOTCONN);
+				if (rx->state == TBV_DMABUF_RX_SPECULATIVE)
+					tbv_dmabuf_spec_drop(true);
+				else
+					tbv_dmabuf_rx_finish(-ENOTCONN);
 				break;
 			}
 	}
+	if (dmabuf_engine.want_ctrl && rail->peer->dmabuf_control == dmabuf_engine.want_ctrl)
+		tbv_dmabuf_want_clear();
 	mutex_unlock(&dmabuf_engine.rx_lock);
 }
 
@@ -1589,8 +2360,14 @@ int tbv_dmabuf_start(struct tbv_state *state)
 		return -ENOMEM;
 	}
 	memset(&dmabuf_engine.rx, 0, sizeof(dmabuf_engine.rx));
+	memset(dmabuf_engine.credits, 0, sizeof(dmabuf_engine.credits));
+	dmabuf_engine.state = state;
 	INIT_DELAYED_WORK(&dmabuf_engine.rx_watchdog, tbv_dmabuf_rx_watch);
 	INIT_WORK(&dmabuf_engine.rx_complete_work, tbv_dmabuf_rx_completed);
+	INIT_WORK(&dmabuf_engine.credit_work, tbv_dmabuf_credit_work);
+	INIT_WORK(&dmabuf_engine.settle_work, tbv_dmabuf_settle_work);
+	if (dmabuf_credits && !tbv_dmabuf_credits_enabled())
+		pr_warn("dmabuf_credits needs dmabuf_push_done=1 and dmabuf_control_ring=0; credits stay off\n");
 	return 0;
 }
 
@@ -1599,11 +2376,16 @@ void tbv_dmabuf_stop(void)
 	if (!dmabuf_engine.tx_wq)
 		return;
 	cancel_delayed_work_sync(&dmabuf_engine.rx_watchdog);
+	cancel_work_sync(&dmabuf_engine.credit_work);
 	mutex_lock(&dmabuf_engine.rx_lock);
+	tbv_dmabuf_want_clear();
+	if (dmabuf_engine.rx.state == TBV_DMABUF_RX_SPECULATIVE)
+		tbv_dmabuf_spec_drop(true);
 	if (tbv_dmabuf_rx_active(&dmabuf_engine.rx))
 		tbv_dmabuf_rx_finish(-ECANCELED);
 	mutex_unlock(&dmabuf_engine.rx_lock);
 	cancel_work_sync(&dmabuf_engine.rx_complete_work);
+	cancel_work_sync(&dmabuf_engine.credit_work);
 	destroy_workqueue(dmabuf_engine.tx_wq);
 	dmabuf_engine.tx_wq = NULL;
 	destroy_workqueue(dmabuf_engine.post_wq);
