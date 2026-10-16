@@ -459,6 +459,32 @@ static void tbv_dmabuf_stop_rail(struct tbv_rail *rail)
 	mutex_unlock(&dmabuf_engine.ring_lock);
 }
 
+/* Reboot/poweroff: stop the rail's data rings before the NHI's own shutdown
+ * removes the domain. Reuses the gpu_direct_used marker, so tbv_path_destroy()
+ * does not stop them a second time (tb_ring_stop() warns on a stopped ring).
+ * Bounded: a batch holding ring_lock must not be able to stall shutdown. */
+int tbv_dmabuf_quiesce_rail(struct tbv_rail *rail)
+{
+	int tries = 1000;
+
+	if (!rail->path.tx_ring || !rail->path.rx_ring ||
+	    (rail->path.state != TBV_PATH_RING_STARTED &&
+	     rail->path.state != TBV_PATH_TUNNEL_ENABLED))
+		return 0;
+	while (!mutex_trylock(&dmabuf_engine.ring_lock)) {
+		if (!--tries)
+			return -EBUSY;
+		msleep(1);
+	}
+	if (!READ_ONCE(rail->gpu_direct_used)) {
+		WRITE_ONCE(rail->gpu_direct_used, true);
+		tb_ring_stop(rail->path.tx_ring);
+		tb_ring_stop(rail->path.rx_ring);
+	}
+	mutex_unlock(&dmabuf_engine.ring_lock);
+	return 0;
+}
+
 static void tbv_dmabuf_batch_drop(struct tbv_dmabuf_batch *batch, bool abort)
 {
 	u64 start = tbv_dmabuf_clock();

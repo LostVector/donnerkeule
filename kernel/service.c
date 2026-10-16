@@ -13,6 +13,7 @@
 #include <linux/uuid.h>
 
 #include "tbv.h"
+#include "verbs_control.h"
 
 const uuid_t tbv_native_service_uuid =
 	UUID_INIT(0x7c2c8f1e, 0x5b4d, 0x4a01, 0x9f, 0x3a,
@@ -532,6 +533,32 @@ static void tbv_service_remove(struct tb_service *svc)
 	kfree(binding);
 }
 
+/*
+ * Reboot/poweroff hook, as thunderbolt_net has. Without it the control and data
+ * rings keep running through device_shutdown() until the NHI's own shutdown
+ * tears the domain down. Stops new TX, then the control ring, then the data
+ * rings; tbv_service_remove() still runs later and finds them stopped. Never
+ * waits for verbs users: userspace is already gone, and a hung shutdown needs a
+ * power cycle.
+ */
+static void tbv_service_shutdown(struct tb_service *svc)
+{
+	struct tbv_service_binding *binding = tb_service_get_drvdata(svc);
+	struct tbv_rail *rail;
+	int ret;
+
+	if (!tbv_service_state || !binding)
+		return;
+	rail = binding->rail;
+	mutex_lock(&tbv_service_state->lock);
+	rail->removing = true;
+	mutex_unlock(&tbv_service_state->lock);
+	tbv_control_stop(binding->peer);
+	ret = tbv_dmabuf_quiesce_rail(rail);
+	dev_info(&svc->dev, "shutdown: control and data rings stopped, status %d\n",
+		 ret);
+}
+
 static const struct tb_service_id tbv_service_ids[] = {
 	{ TB_SERVICE(TBV_NATIVE_PROTOCOL_KEY, TBV_NATIVE_PRTCID),
 	  .driver_data = 0 },
@@ -600,6 +627,7 @@ static struct tb_service_driver tbv_service_driver = {
 	.probe = tbv_service_probe,
 #endif
 	.remove = tbv_service_remove,
+	.shutdown = tbv_service_shutdown,
 	.id_table = tbv_service_ids,
 };
 

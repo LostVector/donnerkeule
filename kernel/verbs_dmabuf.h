@@ -24,6 +24,7 @@ void tbv_dmabuf_debugfs_show(struct seq_file *s);
 int tbv_dmabuf_start(struct tbv_state *state);
 void tbv_dmabuf_stop(void);
 void tbv_dmabuf_disconnect(struct tbv_rail *rail);
+int tbv_dmabuf_quiesce_rail(struct tbv_rail *rail);
 void tbv_dmabuf_cancel(void *context);
 void tbv_dmabuf_cancel_recv(void *owner);
 int tbv_dmabuf_handle_packet(struct tbv_state *state,
