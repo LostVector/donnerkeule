@@ -1,31 +1,22 @@
-# thunderbolt-ibverbs
+# Donnerkeule
 
-[![Hydra module](https://img.shields.io/endpoint?label=hydra%20module&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fthunderbolt-ibverbs%2Fx86_64-linux.thunderbolt-ibverbs%2Fshield&cacheSeconds=60)](https://hydra.hellas.ai/job/hellas/thunderbolt-ibverbs/x86_64-linux.thunderbolt-ibverbs)
+> [!NOTE]
+> Donnerkeule is a fork of [thunderbolt-ibverbs](https://github.com/hellas-ai/thunderbolt-ibverbs) that adds striping, i.e.
+> making two cables appear as one to the software.
+> Use it to run [gufo-rdma](https://github.com/neuhaus/gufo) with two USB4 cables on Strix Halo for tensor parallelism speedups.
+> I achieve around 95% of Infiniband performance with it on average.
 
-*** WARNING ***
-
-this is a research driver. It is buggy, it is insecure, it is not for production.
-for context, narrative, notes and benchmarks see the Hellas blog post:
-https://blog.hellas.ai/blog/thunderbolt-ibverbs/
+> [!WARNING]
+> this is a research driver. It is buggy, it is insecure, it is not for production.
+> for context, narrative, notes and benchmarks see the Hellas blog post:
+> https://blog.hellas.ai/blog/thunderbolt-ibverbs/
 
 ## what is it?
 a linux kernel module + userspace shim to emulate an InfiniBand RDMA verb device across generic usb4/thunderbolt4 DMA rings
 
 ![strix-1 and strix-2 connected directly over Thunderbolt 5](docs/img/strix-strix.jpeg)
 
-## does it work?
-yes! obviously not as well as real hardware, but better than onboard ethernet and lower latency than RXE-over-`thunderbolt-net`
-
-The charts measure one QP (queue pair: an RDMA connection's send and receive
-queues, the unit an application posts its reads, writes and sends to) per
-test, with write striping spreading that QP over four rails.
-
-For tensor-parallel inference RDMA WRITE is the verb that counts: gufo's TP
-exchanges use RDMA WRITE with immediate only, and NCCL/RCCL (as used by vLLM
-across hosts) typically moves its data with RDMA WRITEs as well. RDMA READ
-matters for stacks such as UCX, whose rendezvous protocol fetches large
-messages with READs; READs are limited here (see
-[known limits](docs/IMPROVEMENTS.md#known-limits)).
+### Some striping benchmarks vs. Infiniband
 
 ![Bandwidth by verb and message size with the busy CPU cores of both hosts, 1 QP: usb4_rdma over two USB4 cables with write striping vs InfiniBand FDR on PCIe 3.0 x4](docs/img/bw_vs_size.svg)
 
