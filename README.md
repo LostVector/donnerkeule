@@ -382,7 +382,6 @@ profile=linux_perf|mac_compat|mixed
 tbnet=auto|allow|prefer_rdma|block
 lanes=auto|N|MIN-MAX
 register_verbs=0|1
-native_wr_striping=0|1
 native_fragment_striping=0|1
 native_write_striping=0|1
 native_write_stripe_min_bytes=<bytes>
