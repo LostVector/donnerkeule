@@ -48,6 +48,11 @@ module_param(dmabuf_credits, bool, 0444);
 MODULE_PARM_DESC(dmabuf_credits,
 	"Pre-arm the next GPU SEND receive WQE so the peer can skip PREPARE; requires dmabuf_push_done=1 and dmabuf_control_ring=0");
 
+static bool dmabuf_direct_post = true;
+module_param(dmabuf_direct_post, bool, 0444);
+MODULE_PARM_DESC(dmabuf_direct_post,
+	"With credits, post an idle engine's credited SEND from ibv_post_send instead of the TX worker");
+
 static uint dmabuf_credit_max = SZ_1M;
 module_param(dmabuf_credit_max, uint, 0444);
 MODULE_PARM_DESC(dmabuf_credit_max, "Largest SEND length a credit pre-arms, in bytes");
@@ -55,12 +60,12 @@ MODULE_PARM_DESC(dmabuf_credit_max, "Largest SEND length a credit pre-arms, in b
 enum tbv_dmabuf_credit_counter {
 	CREDIT_GRANTED, CREDIT_COMMITTED, CREDIT_ADOPTED, CREDIT_RELEASED,
 	CREDIT_CANCELED, CREDIT_ABORTED, CREDIT_USED, CREDIT_RETURNED,
-	CREDIT_STALE, CREDIT_MISMATCH, CREDIT_COUNTERS,
+	CREDIT_STALE, CREDIT_MISMATCH, CREDIT_DIRECT, CREDIT_COUNTERS,
 };
 
 static const char * const dmabuf_credit_names[] = {
 	"granted", "committed", "adopted", "released", "canceled", "aborted",
-	"used", "returned", "stale", "mismatch",
+	"used", "returned", "stale", "mismatch", "direct",
 };
 
 static atomic64_t dmabuf_credit_counters[CREDIT_COUNTERS];
@@ -140,6 +145,7 @@ void tbv_dmabuf_debugfs_show(struct seq_file *s)
 	seq_printf(s, "dmabuf_push_done: %u\n", tbv_control_push_enabled());
 	seq_printf(s, "dmabuf_credits: %u\n", tbv_dmabuf_credits_enabled());
 	seq_printf(s, "dmabuf_credit_max: %u\n", dmabuf_credit_max);
+	seq_printf(s, "dmabuf_direct_post: %u\n", dmabuf_direct_post);
 	for (i = 0; i < CREDIT_COUNTERS; i++)
 		seq_printf(s, "dmabuf_credit_%s: %lld\n", dmabuf_credit_names[i],
 			   atomic64_read(&dmabuf_credit_counters[i]));
@@ -233,6 +239,15 @@ struct tbv_dmabuf_job {
 	u64 queued_ns;
 	u64 perf_queued_ns;
 	struct tbv_perf_id perf;
+	/* Frames point back at their batch, so it lives with the WR. */
+	struct tbv_dmabuf_batch batch;
+	/* Set when ibv_post_send() already sent COMMIT and posted the frames
+	 * (tbv_dmabuf_tx_direct); the worker then only waits and finishes. */
+	struct tbv_dmabuf_wire wire;
+	struct tbv_ctrl_pending *pending;
+	unsigned long deadline;
+	int direct_ret;
+	bool posted;
 };
 
 /* OPEN retains the WR between DMA batches; CACHED retains its final result.
@@ -286,6 +301,9 @@ struct tbv_dmabuf_credit {
 struct tbv_dmabuf_engine {
 	struct workqueue_struct *tx_wq, *post_wq;
 	struct mutex rx_lock, ring_lock, tx_lock;
+	/* Orders submissions with direct posting: queued or running TX jobs. */
+	struct mutex submit_lock;
+	atomic_t tx_jobs;
 	struct tbv_state *state;
 	void *active_context;
 	struct tbv_dmabuf_batch *active_batch;
@@ -312,6 +330,8 @@ static struct tbv_dmabuf_engine dmabuf_engine = {
 	.rx_lock = __MUTEX_INITIALIZER(dmabuf_engine.rx_lock),
 	.ring_lock = __MUTEX_INITIALIZER(dmabuf_engine.ring_lock),
 	.tx_lock = __MUTEX_INITIALIZER(dmabuf_engine.tx_lock),
+	.submit_lock = __MUTEX_INITIALIZER(dmabuf_engine.submit_lock),
+	.tx_jobs = ATOMIC_INIT(0),
 	.token = ATOMIC64_INIT(0),
 	.rx_wait = __WAIT_QUEUE_HEAD_INITIALIZER(dmabuf_engine.rx_wait),
 	.credit_lock = __SPIN_LOCK_UNLOCKED(dmabuf_engine.credit_lock),
@@ -1896,6 +1916,26 @@ static void tbv_dmabuf_credit_adopted(const u8 *host, u32 credit)
 	spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
 }
 
+/* Takes a held credit that matches this WR, without releasing any other. */
+static u32 tbv_dmabuf_credit_take(const u8 *host, const struct tbv_dmabuf_wire *m)
+{
+	struct tbv_dmabuf_credit *c;
+	unsigned long flags;
+	u32 credit = 0;
+
+	spin_lock_irqsave(&dmabuf_engine.credit_lock, flags);
+	c = tbv_dmabuf_credit_slot(host, false);
+	if (c && c->valid && !c->cancel && tbv_dmabuf_credit_match(&c->wire, m)) {
+		credit = c->wire.credit;
+		c->valid = false;
+		c->done = max(c->done, credit);
+	}
+	spin_unlock_irqrestore(&dmabuf_engine.credit_lock, flags);
+	if (credit)
+		tbv_dmabuf_credit_count(CREDIT_USED);
+	return credit;
+}
+
 static int tbv_dmabuf_zero_copy(void *context, u32 offset, void *data,
 				u32 bytes, bool to_mr)
 {
@@ -2030,7 +2070,7 @@ static void tbv_dmabuf_settle_work(struct work_struct *work)
 static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 {
 	struct tbv_dmabuf_wire m = {};
-	struct tbv_dmabuf_batch batch = {};
+	struct tbv_dmabuf_batch *batch = &job->batch;
 	struct tbv_peer *peer = job->route->peer;
 	struct tbv_ctrl_pending *pending = NULL;
 	bool fast = tbv_control_required(peer);
@@ -2040,6 +2080,11 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 	u32 offset = 0;
 	int ret = 0;
 
+	if (job->posted) {
+		m = job->wire;
+		pending = job->pending;
+		goto prepared;
+	}
 	m.token = atomic64_inc_return(&dmabuf_engine.token);
 	if (!m.token)
 		return -EOVERFLOW;
@@ -2053,6 +2098,7 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 	memcpy(m.src_host, job->state->native_host_id, 16);
 	memcpy(m.dst_host, peer->remote_host_id, 16);
 	memcpy(m.src_domain, peer->xd->local_uuid, 16);
+prepared:
 	do {
 		u64 start;
 		u64 perf_start, batch_start = tbv_perf_clock();
@@ -2060,12 +2106,20 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 		u32 rnr = 0, failures = 0, credit = 0;
 		bool remote_armed = false;
 
+		if (job->posted) {
+			/* tbv_dmabuf_tx_direct() sent COMMIT and posted the frames. */
+			job->posted = false;
+			deadline = job->deadline;
+			remote_armed = true;
+			ret = job->direct_ret;
+			goto posted;
+		}
 		memset(m.lanes, 0, sizeof(m.lanes));
 		perf_start = tbv_perf_clock();
 		mutex_lock(&dmabuf_engine.tx_lock);
 		dmabuf_engine.active_context = job->buffer.context;
-		dmabuf_engine.active_batch = &batch;
-		ret = tbv_dmabuf_tx_paths(job, &m, &batch);
+		dmabuf_engine.active_batch = batch;
+		ret = tbv_dmabuf_tx_paths(job, &m, batch);
 		tbv_perf_span(&job->perf, "tx_paths_lock", perf_start, ret, m.count);
 		if (ret) {
 			mutex_unlock(&dmabuf_engine.tx_lock);
@@ -2075,7 +2129,7 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 		m.bytes = min_t(u32, job->hdr.length - offset,
 			m.count * TBV_DMABUF_BATCH_FRAMES * TBV_DMABUF_FRAME_BYTES);
 		start = tbv_dmabuf_clock();
-		ret = tbv_dmabuf_batch_alloc(&batch, &m, &job->buffer, true);
+		ret = tbv_dmabuf_batch_alloc(batch, &m, &job->buffer, true);
 		tbv_dmabuf_record(TBV_DMABUF_TX_BUILD, start);
 		mutex_unlock(&dmabuf_engine.tx_lock);
 		if (ret)
@@ -2171,7 +2225,7 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 			mutex_lock(&dmabuf_engine.tx_lock);
 			dmabuf_engine.active_context = NULL;
 			dmabuf_engine.active_batch = NULL;
-			tbv_dmabuf_batch_drop(&batch, false);
+			tbv_dmabuf_batch_drop(batch, false);
 			mutex_unlock(&dmabuf_engine.tx_lock);
 			tbv_perf_wire(&m, true, "batch", batch_start, 0, 0);
 			offset += m.bytes;
@@ -2184,14 +2238,15 @@ static int tbv_dmabuf_tx(struct tbv_dmabuf_job *job)
 		perf_start = tbv_perf_clock();
 		mutex_lock(&dmabuf_engine.tx_lock);
 		ret = job->buffer.alive(job->buffer.context) ?
-			tbv_dmabuf_batch_post(&batch, true) : -ECANCELED;
+			tbv_dmabuf_batch_post(batch, true) : -ECANCELED;
 		mutex_unlock(&dmabuf_engine.tx_lock);
 		tbv_dmabuf_record(TBV_DMABUF_TX_POST, start);
 		tbv_perf_wire(&m, true, "batch_post", perf_start, ret, 0);
+posted:
 		if (!ret) {
 			start = tbv_dmabuf_clock();
 			perf_start = tbv_perf_clock();
-			ret = tbv_dmabuf_batch_wait(&batch, &job->buffer, deadline);
+			ret = tbv_dmabuf_batch_wait(batch, &job->buffer, deadline);
 			tbv_dmabuf_record(TBV_DMABUF_TX_WAIT, start);
 			tbv_perf_wire(&m, true, "tx_dma_wait", perf_start, ret, 0);
 		}
@@ -2250,7 +2305,7 @@ drop:
 		mutex_lock(&dmabuf_engine.tx_lock);
 		dmabuf_engine.active_context = NULL;
 		dmabuf_engine.active_batch = NULL;
-		tbv_dmabuf_batch_drop(&batch, !!ret);
+		tbv_dmabuf_batch_drop(batch, !!ret);
 		mutex_unlock(&dmabuf_engine.tx_lock);
 		tbv_perf_wire(&m, true, "batch", batch_start, ret, 0);
 		if (ret)
@@ -2258,6 +2313,95 @@ drop:
 		offset += m.bytes;
 	} while (offset < job->hdr.length);
 	return 0;
+}
+
+/*
+ * ibv_post_send() context, with no other TX job queued or running: send COMMIT
+ * and post the frames of a single-batch GPU SEND that a held credit covers,
+ * saving the TX worker's wakeup before them. The worker then only waits for
+ * the DMA and DONE and finishes the WR. Anything else stays with the worker.
+ */
+static void tbv_dmabuf_tx_direct(struct tbv_dmabuf_job *job)
+{
+	struct tbv_peer *peer = job->route->peer;
+	struct tbv_dmabuf_wire *m = &job->wire;
+	struct tbv_dmabuf_batch *batch = &job->batch;
+	struct tbv_ctrl_pending *pending;
+	u64 perf_start = tbv_perf_clock();
+	u32 credit;
+	int ret;
+
+	if (!tbv_dmabuf_credits_enabled() || !READ_ONCE(peer->remote_dmabuf_credit) ||
+	    !tbv_control_xdomain_required(peer) ||
+	    (job->hdr.opcode != TBV_NATIVE_DATA_OP_SEND &&
+	     job->hdr.opcode != TBV_NATIVE_DATA_OP_SEND_IMM) ||
+	    !job->hdr.length || job->hdr.length > dmabuf_credit_max ||
+	    !tbv_dmabuf_credit_held(peer->remote_host_id))
+		return;
+	memset(m, 0, sizeof(*m));
+	m->token = atomic64_inc_return(&dmabuf_engine.token);
+	if (!m->token)
+		return;
+	m->hdr = job->hdr;
+	m->hdr.flags |= TBV_NATIVE_DATA_F_RAW_STREAM;
+	memcpy(m->src_host, job->state->native_host_id, 16);
+	memcpy(m->dst_host, peer->remote_host_id, 16);
+	memcpy(m->src_domain, peer->xd->local_uuid, 16);
+	if (job->perf_queued_ns) {
+		job->perf = tbv_perf_wire_id(m, true);
+		job->perf.wr_id = job->buffer.wr_id;
+		job->perf.bytes = job->hdr.length;
+	}
+	mutex_lock(&dmabuf_engine.tx_lock);
+	dmabuf_engine.active_context = job->buffer.context;
+	dmabuf_engine.active_batch = batch;
+	ret = tbv_dmabuf_tx_paths(job, m, batch);
+	if (!ret) {
+		m->bytes = m->hdr.length;
+		ret = m->bytes > m->count * TBV_DMABUF_BATCH_FRAMES *
+			TBV_DMABUF_FRAME_BYTES ? -EMSGSIZE :
+			tbv_dmabuf_batch_alloc(batch, m, &job->buffer, true);
+	}
+	mutex_unlock(&dmabuf_engine.tx_lock);
+	if (ret)
+		goto drop;
+	/* DONE is registered before the credit is taken: a taken credit
+	 * must reach the receiver as COMMIT. */
+	m->op = TBV_DMABUF_PREPARE;
+	pending = tbv_control_open(peer, m);
+	if (IS_ERR(pending))
+		goto drop;
+	credit = tbv_dmabuf_credit_take(m->dst_host, m);
+	if (!credit) {
+		tbv_control_close(pending);
+		goto drop;
+	}
+	job->pending = pending;
+	job->deadline = jiffies + job->timeout * (job->retries + 1);
+	job->posted = true;
+	m->op = TBV_DMABUF_COMMIT | TBV_DMABUF_REPLY;
+	m->credit = credit;
+	ret = tbv_control_notify(tbv_control_of(pending), m);
+	m->op = TBV_DMABUF_PREPARE;
+	m->credit = 0;
+	if (!ret) {
+		dma_wmb();
+		mutex_lock(&dmabuf_engine.tx_lock);
+		ret = job->buffer.alive(job->buffer.context) ?
+			tbv_dmabuf_batch_post(batch, true) : -ECANCELED;
+		mutex_unlock(&dmabuf_engine.tx_lock);
+	}
+	job->direct_ret = ret;
+	if (!ret)
+		tbv_dmabuf_credit_count(CREDIT_DIRECT);
+	tbv_perf_wire(m, true, "tx_direct", perf_start, ret, credit);
+	return;
+drop:
+	mutex_lock(&dmabuf_engine.tx_lock);
+	dmabuf_engine.active_context = NULL;
+	dmabuf_engine.active_batch = NULL;
+	tbv_dmabuf_batch_drop(batch, false);
+	mutex_unlock(&dmabuf_engine.tx_lock);
 }
 
 static void tbv_dmabuf_tx_work(struct work_struct *work)
@@ -2269,7 +2413,10 @@ static void tbv_dmabuf_tx_work(struct work_struct *work)
 	int ret;
 
 	tbv_dmabuf_record(TBV_DMABUF_QUEUE, job->queued_ns);
-	ret = job->buffer.alive(job->buffer.context) ? tbv_dmabuf_tx(job) : -ECANCELED;
+	ret = job->posted || job->buffer.alive(job->buffer.context) ?
+		tbv_dmabuf_tx(job) : -ECANCELED;
+	/* The rings are free for the next submission to post directly. */
+	atomic_dec(&dmabuf_engine.tx_jobs);
 	perf_end = tbv_perf_clock();
 	tbv_perf_interval(&job->perf, "tx_queue", job->perf_queued_ns, perf_start, 0, 0);
 	tbv_perf_interval(&job->perf, "tx_job", perf_start, perf_end, ret, 0);
@@ -2316,7 +2463,12 @@ int tbv_dmabuf_submit(struct tbv_state *state, struct tbv_rail *rail,
 		job->perf.opcode = hdr->opcode;
 	}
 	refcount_inc(&rail->refcnt);
+	/* Queueing under the lock keeps a later WR behind one posted here. */
+	mutex_lock(&dmabuf_engine.submit_lock);
+	if (atomic_inc_return(&dmabuf_engine.tx_jobs) == 1 && dmabuf_direct_post)
+		tbv_dmabuf_tx_direct(job);
 	queue_work(dmabuf_engine.tx_wq, &job->work);
+	mutex_unlock(&dmabuf_engine.submit_lock);
 	return 0;
 }
 

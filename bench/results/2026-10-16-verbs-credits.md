@@ -136,16 +136,59 @@ Readings:
   claim. The flows differ: SEND hands ownership back with the receive WQE,
   WRITE_IMM with an explicit barrier.
 
+## Follow-up, 17 October: Gufo's exchange and direct posting
+
+Gufo branch `feat/verbs-dmabuf-sendimm` (based on `origin/rdma`, not pushed)
+moves its three exchange windows to uncached DMA-BUF device memory when both
+ranks can register it, and sends each partial with SEND_WITH_IMM into the
+peer's posted window. Otherwise, as on today's production module, it keeps
+host windows and WRITE_WITH_IMM. Two Gufo changes affect both window types:
+
+- Exchanges finish without waiting for their own send completion.
+- Spin waits yield every 64 iterations. A spinning exchange thread had held
+  off the per-CPU worker that finishes USB4 ring completions for a scheduler
+  slice: about 3 ms p99 tails, which disappeared when the processes were
+  pinned away from the Thunderbolt interrupt CPUs.
+
+Driver traces then showed the remaining single-row gap came from two worker
+wakeups: the TX worker before a credited SEND (2.3–2.9 µs) and the RX
+completion worker (1.8–2.3 µs). The driver now posts a credited single-batch
+SEND from `ibv_post_send()` when no other TX job is queued or running
+(`dmabuf_direct_post=1`, default). The TX worker then only waits for DMA and
+DONE. A submit lock covers the idle check, direct posting and queueing.
+
+`tp_batched_probe --allreduce-bench 1000` runs Gufo's production queued
+exchange (stage kernel, host transfer thread, wait kernel, add) and checks
+every sum exactly. Four alternating rounds per mode, p50 in µs, median of
+eight rank/round values; all 96 rank-runs verified:
+
+| Rows (bytes) | Device windows, direct post | Device windows, TX worker | Host windows (production path) |
+|---|---:|---:|---:|
+| 1 (10,240) | **29.5** | 32.4 | 32.0 |
+| 2 (20,480) | **31.8** | 34.0 | 41.8 |
+| 8 (81,920) | **45.6** | 45.8 | 54.6 |
+| 512 (5,242,880) | **1,316** | 1,314 | 1,419 |
+
+Single-row p99 was 52–83 µs with direct posting, 51–66 µs on host windows and
+70–101 µs via the TX worker. Direct posting covered 2,990–2,995 of 3,000 WRs
+per host and run. These are exchange-level numbers; deferred completion
+means minimum times can exclude a rank's own transfer, so they are not
+reported. Model throughput and token-level agreement are still unmeasured.
+
+The full verifier matrix, remote-error, RNR-delay and persistent SEND_IMM
+cases passed again with direct posting. Evidence is in
+[gufo/](2026-10-16-verbs-credits/gufo/): logs and debugfs snapshots for
+every run, including those with the rejected early TX-ring kick. Large
+traces are not kept.
+
 ## Status and next steps
 
 - The receive-window protocol is specified and implemented for SEND within
   the existing verbs QP/MR/CQ contract. No new user API was added; an
   application uses it by sending into posted receive WQEs.
-- **Gufo:** to benefit, its verbs adapter would post its three GPU windows as
-  receive WQEs and use SEND_WITH_IMM for decode-size exchanges. This works the
-  same over InfiniBand. That belongs with step 2 of the earlier list (DMA-BUF
-  registration in the shared adapter). Neither change is made yet, and model
-  throughput was not measured.
+- **Gufo:** the adapter change is on a Gufo branch (see the follow-up above).
+  Its exchange is at or below the host path at every measured size. The next
+  check is end to end: tokens/s, prefill and token-level agreement.
 - WRITE remains PREPARE-bound. Removing that round trip would need the sender
   to publish targets ahead of time, which is a different protocol.
 - Loss/reconnect qualification, parallel QPs with credits, and GPU reset

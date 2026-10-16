@@ -212,6 +212,13 @@ Ablauf:
    statt 1–2 ms zu schlafen und erneut zu fragen. Das Posten der WQE beim
    Empfänger ist damit das Signal zum Senden.
 
+6. Ist kein anderer TX-Auftrag eingereiht oder aktiv, nimmt bereits
+   `ibv_post_send()` einen passenden Credit, sendet COMMIT und postet die
+   Frames (`dmabuf_direct_post=1`, Standard). Der TX-Worker wartet danach nur
+   noch auf DMA und DONE und schließt den WR ab. Das spart das Aufwecken des
+   Workers vor den Daten. Eine Sperre umfasst Leerlaufprüfung, direktes
+   Posten und Einreihen, sodass spätere WRs dahinter bleiben.
+
 Credits gelten nur für einen Batch und höchstens `dmabuf_credit_max` Byte
 (Standard 1 MiB). Es gibt höchstens einen armierten Credit je Empfänger, wie
 es auch nur eine aktive RX-Transaktion gibt. Die Credit-Nummer liegt im bisher
@@ -227,10 +234,11 @@ den Modus nicht verwenden.
 
 Debugfs `summary` zeigt `dmabuf_credits`, `dmabuf_credit_max` sowie
 `dmabuf_credit_granted`, `committed`, `adopted`, `released`, `canceled`,
-`aborted` (Empfänger) und `used`, `returned`, `stale` (Sender). `mismatch`
+`aborted` (Empfänger) und `used`, `returned`, `stale`, `direct` (Sender). `mismatch`
 zählt unerwartete Credit-Meldungen; deren Lanes werden stillgelegt.
 Profiling-Tracepoints: `credit_grant`, `credit_received`, `credit_commit`,
-`credit_commit_rx`, `credit_release`, `credit_release_rx`, `rnr_credit_wait`.
+`credit_commit_rx`, `credit_release`, `credit_release_rx`, `rnr_credit_wait`,
+`tx_direct`.
 
 ## Schnittstelle und Speichervertrag
 
