@@ -20,6 +20,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from tbv_bench import parse_lat, run_local, ssh_args as bench_ssh_args, summary_rows
 from typing import Any
 
 
@@ -317,37 +319,7 @@ def rdma_core_for(host: str) -> str:
 
 
 def ssh_args(target: str, command: str) -> list[str]:
-    args = [
-        "ssh",
-    ]
-    if SSH_CONFIG:
-        args.extend(["-F", SSH_CONFIG])
-    args.extend([
-        "-o",
-        "ConnectTimeout=8",
-        "-o",
-        "BatchMode=yes",
-    ])
-    for option in SSH_OPTIONS:
-        args.extend(["-o", option])
-    args.extend([
-        target,
-        "sudo -n bash -lc " + shlex.quote(command),
-    ])
-    return args
-
-
-def run_local(args: list[str], *, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=timeout,
-    )
-    if check and proc.returncode != 0:
-        raise RuntimeError(proc.stdout)
-    return proc
+    return bench_ssh_args(target, command, config=SSH_CONFIG, options=SSH_OPTIONS)
 
 
 def run_ssh(target: str, command: str, *, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -725,19 +697,17 @@ def build_perftest_command(
 
 def parse_bw(stdout: str, bidirectional: bool) -> dict[str, Any]:
     rows = []
-    for line in stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 5 and parts[0].isdigit() and parts[1].isdigit():
-            try:
-                rows.append({
-                    "bytes": int(parts[0]),
-                    "iters": int(parts[1]),
-                    "peak_gbps": float(parts[2]),
-                    "avg_gbps": float(parts[3]),
-                    "msg_rate_mpps": float(parts[4]),
-                })
-            except ValueError:
-                continue
+    for parts in summary_rows(stdout, 5):
+        try:
+            rows.append({
+                "bytes": int(parts[0]),
+                "iters": int(parts[1]),
+                "peak_gbps": float(parts[2]),
+                "avg_gbps": float(parts[3]),
+                "msg_rate_mpps": float(parts[4]),
+            })
+        except ValueError:
+            continue
     if not rows:
         raise ValueError("could not parse bandwidth summary")
     if bidirectional and len(rows) > 1:
@@ -754,22 +724,6 @@ def parse_bw(stdout: str, bidirectional: bool) -> dict[str, Any]:
         "msg_rate_mpps": f"{row['msg_rate_mpps']:.6f}",
         "bw_rows": rows,
     }
-
-
-def parse_lat(stdout: str) -> dict[str, Any]:
-    for line in stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 9 and parts[0].isdigit() and parts[1].isdigit():
-            return {
-                "lat_min_us": parts[2],
-                "lat_max_us": parts[3],
-                "lat_typical_us": parts[4],
-                "lat_avg_us": parts[5],
-                "lat_stdev_us": parts[6],
-                "lat_p99_us": parts[7],
-                "lat_p999_us": parts[8],
-            }
-    raise ValueError("could not parse latency summary")
 
 
 def load_remote_json(host: str, path: str) -> Any:

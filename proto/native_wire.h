@@ -59,6 +59,13 @@ enum tbv_native_wire_cap {
 	TBV_NATIVE_WIRE_CAP_UC = 1u << 0,
 	TBV_NATIVE_WIRE_CAP_RC = 1u << 1,
 	TBV_NATIVE_WIRE_CAP_MULTI_RAIL = 1u << 2,
+	/* Exclusive raw DMA-BUF pool mode, incompatible with verbs data. */
+	TBV_NATIVE_WIRE_CAP_GPU_DIRECT = 1u << 3,
+	/* Verbs-owned descriptor transport and kernel USB4 rendezvous. */
+	TBV_NATIVE_WIRE_CAP_DMABUF_VERBS = 1u << 4,
+	TBV_NATIVE_WIRE_CAP_CONTROL_RING = 1u << 5,
+	/* Pushed descriptor DONE on the existing configuration channel. */
+	TBV_NATIVE_WIRE_CAP_PUSH_DONE = 1u << 6,
 };
 
 enum tbv_native_wire_path_flag {

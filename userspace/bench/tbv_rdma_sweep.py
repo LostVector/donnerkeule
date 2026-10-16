@@ -10,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 
+from tbv_bench import parse_lat, run_local, ssh_args as bench_ssh_args, summary_rows
+
 
 CSV_FIELDS = [
     "timestamp_utc",
@@ -72,28 +74,7 @@ def parse_csv_ints(value: str) -> list[int]:
 
 
 def ssh_args(target: str, command: str) -> list[str]:
-    return [
-        "ssh",
-        "-o",
-        "ConnectTimeout=8",
-        "-o",
-        "BatchMode=yes",
-        target,
-        "sudo -n bash -lc " + shlex.quote(command),
-    ]
-
-
-def run_local(args: list[str], *, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess:
-    proc = subprocess.run(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=timeout,
-    )
-    if check and proc.returncode != 0:
-        raise RuntimeError(proc.stdout)
-    return proc
+    return bench_ssh_args(target, command)
 
 
 def run_ssh(host: str, command: str, *, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess:
@@ -196,31 +177,13 @@ def state_for_csv(state: dict[str, object]) -> tuple[str, str, str]:
 
 
 def parse_bw(stdout: str) -> dict[str, str]:
-    for line in stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 5 and parts[0].isdigit() and parts[1].isdigit():
-            return {
-                "bw_peak_gbps": parts[2],
-                "bw_avg_gbps": parts[3],
-                "msg_rate_mpps": parts[4],
-            }
+    for parts in summary_rows(stdout, 5):
+        return {
+            "bw_peak_gbps": parts[2],
+            "bw_avg_gbps": parts[3],
+            "msg_rate_mpps": parts[4],
+        }
     raise ValueError("could not parse bandwidth summary")
-
-
-def parse_lat(stdout: str) -> dict[str, str]:
-    for line in stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 9 and parts[0].isdigit() and parts[1].isdigit():
-            return {
-                "lat_min_us": parts[2],
-                "lat_max_us": parts[3],
-                "lat_typical_us": parts[4],
-                "lat_avg_us": parts[5],
-                "lat_stdev_us": parts[6],
-                "lat_p99_us": parts[7],
-                "lat_p999_us": parts[8],
-            }
-    raise ValueError("could not parse latency summary")
 
 
 def perftest_command(bin_name: str, args: argparse.Namespace, size: int, iters: int, qps: int, port: int, peer: str | None) -> str:

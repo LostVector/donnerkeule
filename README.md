@@ -92,6 +92,31 @@ tbv_vllm_smoke.sh \
 
 ## Status
 
+Latest GPU-RDMA checkpoint: [16 October measurements, current status and next steps](bench/results/2026-10-16-verbs-parity.md).
+Earlier [architecture checkpoint](docs/GPU_RDMA_STATUS_2026-10-04.md) is retained for context.
+
+- The opt-in [DMA-BUF verbs implementation](docs/GPU_VERBS.md) uses standard
+  MR registration, SEND/WRITE operations and CQs with direct NHI descriptors.
+  The first [hardware qualification and timing comparison](bench/results/2026-10-05-verbs-dmabuf.md)
+  passed on fuzzy and misty. The mode remains experimental: GPU lengths require
+  32-byte alignment. Latest driver benchmarks reach near host-path parity at
+  1–32 MiB; small messages remain slower.
+  [Phase profiling and parallel NHI posting](bench/results/2026-10-05-verbs-dmabuf-optimization.md)
+  reduced 1 MiB and 20 MiB latency by about 21% within the direct path; the
+  small-message performance gap remains.
+  The optional [separate NHI control-ring prototype](bench/results/2026-10-06-verbs-control-ring.md)
+  passed the same matrices with pushed DONE completions. Its small control
+  latency gain does not offset giving up data rings on the tested AMD NHIs;
+  `dmabuf_control_ring` defaults to 0.
+  [Pushed DONE over the existing XDomain channel](bench/results/2026-10-07-xdomain-done.md)
+  preserves all four data rails. It is opt-in with `dmabuf_push_done=1` and
+  passed the [16 October driver qualification](bench/results/2026-10-16-verbs-parity.md).
+
+- An opt-in [GPU-to-GPU DMA-BUF pool experiment](docs/GPU_DIRECT.md) places
+  HIP allocations directly in native NHI TX/RX descriptors and stripes them
+  across the rails. The experimental Gufo adapter now uses producer leases and
+  overlapped prefill; [model correctness and performance results](bench/results/2026-10-03-gufo-direct.md)
+  are retained. It is an exclusive message path; ordinary verbs remain the default.
 - Native Linux-to-Linux verbs transport is the main path.
 - Apple-compatible transport exists, but is still experimental.
 - The module builds against stock kernels, but needs Linux 6.14 or newer

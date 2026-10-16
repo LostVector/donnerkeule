@@ -30,7 +30,6 @@
       systems = linuxSystems ++ darwinSystems;
       forAllSystems = f: lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
       forLinuxSystems = f: lib.genAttrs linuxSystems (system: f (import nixpkgs { inherit system; }));
-      forDarwinSystems = f: lib.genAttrs darwinSystems (system: f (import nixpkgs { inherit system; }));
       mkThunderboltKernel =
         pkgs:
         let
@@ -45,11 +44,10 @@
           };
         });
       mkThunderboltLinuxPackages = pkgs: pkgs.linuxPackagesFor (mkThunderboltKernel pkgs);
-      rdmaCoreUsb4Patches = [
-        ./packaging/rdma-core-patches/0001-providers-usb4_rdma-add-USB4-soft-RDMA-provider.patch
-        ./packaging/rdma-core-patches/0002-CMakeLists.txt-build-the-usb4_rdma-provider.patch
-        ./packaging/rdma-core-patches/0003-libibverbs-verbs.h-declare-verbs_provider_usb4_rdma.patch
-      ];
+      rdmaCoreUsb4Patches = map
+        (name: ./packaging/rdma-core-patches + "/${name}")
+        (lib.filter (name: name != "")
+          (lib.splitString "\n" (builtins.readFile ./packaging/rdma-core-patches/series)));
       mkRdmaCoreUsb4 =
         pkgs:
         pkgs.rdma-core.overrideAttrs (old: {
@@ -75,24 +73,7 @@
 
           buildPhase = ''
             runHook preBuild
-            for script in \
-              packaging/regen-rdma-core-patches.sh \
-              packaging/test-rdma-patches.sh \
-              tools/tbv-target-module.sh \
-              tools/ci/distro-build.sh \
-              tools/ci/distro-install.sh \
-              tools/ci/distro-package-rdma.sh \
-              tools/ci/distro-package.sh \
-              tools/ci/vm-guest-smoke.sh \
-              tools/ci/vm-smoke.sh \
-              userspace/bench/tbv_vllm_smoke.sh
-            do
-              bash -n "$script"
-            done
-            python -m py_compile \
-              userspace/bench/tbv_perftest_runner.py \
-              userspace/bench/tbv_rdma_sweep.py \
-              userspace/bench/tbv_uc_stress.py
+            python tools/ci/check-syntax.py
             runHook postBuild
           '';
 
@@ -160,30 +141,13 @@
           version = "0.4.0";
           src = ./.;
 
+          nativeBuildInputs = [ pkgs.python3 pkgs.git ];
+
           dontConfigure = true;
 
           buildPhase = ''
             runHook preBuild
-            $CC -std=c11 -Wall -Wextra -Werror -I. \
-              tools/ci/proto-smoke.c \
-              -o tbv-proto-smoke
-            ./tbv-proto-smoke
-            $CC -std=c11 -Wall -Wextra -Werror -I. \
-              tools/ci/reliability-smoke.c \
-              proto/reliability.c \
-              -o tbv-reliability-smoke
-            ./tbv-reliability-smoke
-            $CC -std=c11 -Wall -Wextra -Werror -I. \
-              tools/ci/identity-smoke.c \
-              proto/identity.c \
-              -o tbv-identity-smoke
-            ./tbv-identity-smoke
-            $CC -std=c11 -Wall -Wextra -Werror -I. \
-              tools/ci/config-smoke.c \
-              proto/config.c \
-              proto/identity.c \
-              -o tbv-config-smoke
-            ./tbv-config-smoke
+            python tools/ci/run-smoke.py
             runHook postBuild
           '';
 
@@ -335,7 +299,9 @@
             linux-thunderbolt-dev = thunderboltKernel.dev;
             linux-thunderbolt-modules = thunderboltKernel.modules;
             rdma-core-usb4 = rdmaCoreUsb4;
+            rdma-core-source = pkgs.rdma-core.src;
             thunderbolt-ibverbs = module;
+            thunderbolt-ibverbs-no-profiling = module.override { enableProfiling = false; };
             thunderbolt-ibverbs-linux-thunderbolt = moduleForThunderboltKernel;
             tbv-perftest = perftestBench.runner;
           }
@@ -402,6 +368,10 @@
           script-syntax = mkScriptSyntaxCheck pkgs;
           proto-smoke = mkProtoSmoke pkgs;
           rdma-core-usb4 = pkgsAt.rdma-core-usb4;
+          rdma-core-static = pkgsAt.rdma-core-usb4.overrideAttrs (old: {
+            cmakeFlags = lib.filter (flag: !(lib.hasPrefix "-DENABLE_STATIC=" flag))
+              (old.cmakeFlags or [ ]) ++ [ "-DENABLE_STATIC=1" ];
+          });
           verbs-smoke-build = mkVerbsSmokeBuild pkgs;
         }
       );

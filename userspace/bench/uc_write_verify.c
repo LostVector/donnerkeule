@@ -29,6 +29,8 @@
 
 #define MAGIC 0x55435752u /* 'UCWR' */
 
+#include "tbv_bench.h"
+
 struct opts {
 	const char *role;
 	const char *dev;
@@ -48,98 +50,6 @@ struct wire_info {
 	uint64_t addr;
 	uint8_t gid[16];
 };
-
-static uint64_t now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-static int send_all(int fd, const void *buf, size_t len)
-{
-	const char *p = buf;
-
-	while (len) {
-		ssize_t n = send(fd, p, len, 0);
-
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			return -1;
-		}
-		p += n;
-		len -= (size_t)n;
-	}
-	return 0;
-}
-
-static int recv_all(int fd, void *buf, size_t len)
-{
-	char *p = buf;
-
-	while (len) {
-		ssize_t n = recv(fd, p, len, 0);
-
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			return -1;
-		}
-		if (!n)
-			return -1;
-		p += n;
-		len -= (size_t)n;
-	}
-	return 0;
-}
-
-static int tcp_listen(int port)
-{
-	struct sockaddr_in addr = {};
-	int fd;
-	int one = 1;
-
-	fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (fd < 0)
-		return -1;
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	addr.sin_port = htons((uint16_t)port);
-	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) ||
-	    listen(fd, 1)) {
-		close(fd);
-		return -1;
-	}
-	return fd;
-}
-
-static int tcp_connect(const char *host, int port)
-{
-	struct addrinfo hints = {};
-	struct addrinfo *res = NULL;
-	char port_s[16];
-	int fd = -1;
-
-	snprintf(port_s, sizeof(port_s), "%d", port);
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	if (getaddrinfo(host, port_s, &hints, &res))
-		return -1;
-	for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-		fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-		if (fd < 0)
-			continue;
-		if (!connect(fd, ai->ai_addr, ai->ai_addrlen))
-			break;
-		close(fd);
-		fd = -1;
-	}
-	freeaddrinfo(res);
-	return fd;
-}
 
 static int parse_size(const char *s, size_t *out)
 {
@@ -265,9 +175,9 @@ static int modify_qp_uc(struct ibv_qp *qp, int port, int gid_index,
 
 static int poll_send(struct ibv_cq *cq, uint64_t wr_id)
 {
-	uint64_t deadline = now_ns() + 5ull * 1000 * 1000 * 1000;
+	uint64_t deadline = tbv_bench_now_ns() + 5ull * 1000 * 1000 * 1000;
 
-	while (now_ns() < deadline) {
+	while (tbv_bench_now_ns() < deadline) {
 		struct ibv_wc wc;
 		int n = ibv_poll_cq(cq, 1, &wc);
 
@@ -337,14 +247,14 @@ int main(int argc, char **argv)
 	}
 
 	if (!strcmp(o.role, "recv")) {
-		listen_fd = tcp_listen(o.tcp_port);
+		listen_fd = tbv_bench_tcp_listen(o.tcp_port);
 		if (listen_fd < 0) {
 			perror("listen");
 			goto out;
 		}
 		fd = accept(listen_fd, NULL, NULL);
 	} else {
-		fd = tcp_connect(o.connect_host, o.tcp_port);
+		fd = tbv_bench_tcp_connect(o.connect_host, o.tcp_port);
 	}
 	if (fd < 0) {
 		perror("tcp");
@@ -393,14 +303,14 @@ int main(int argc, char **argv)
 
 	local.magic = MAGIC;
 	local.qpn = qp->qp_num;
-	local.psn = (uint32_t)(now_ns() & 0xffffffu);
+	local.psn = (uint32_t)(tbv_bench_now_ns() & 0xffffffu);
 	local.lid = port_attr.lid;
 	local.rkey = mr->rkey;
 	local.addr = (uintptr_t)buf;
 	memcpy(local.gid, &gid, sizeof(local.gid));
 
-	if (send_all(fd, &local, sizeof(local)) ||
-	    recv_all(fd, &remote, sizeof(remote)) ||
+	if (tbv_bench_send_all(fd, &local, sizeof(local)) ||
+	    tbv_bench_recv_all(fd, &remote, sizeof(remote)) ||
 	    remote.magic != MAGIC) {
 		fprintf(stderr, "metadata exchange failed\n");
 		goto out;
@@ -440,13 +350,13 @@ int main(int argc, char **argv)
 			goto out;
 		}
 		token = 'D';
-		if (send_all(fd, &token, 1) || recv_all(fd, &result, sizeof(result)))
+		if (tbv_bench_send_all(fd, &token, 1) || tbv_bench_recv_all(fd, &result, sizeof(result)))
 			goto out;
 		printf("send_complete result=%d size=%zu\n", result, o.size);
 	} else {
 		struct timespec rest;
 
-		if (recv_all(fd, &token, 1) || token != 'D')
+		if (tbv_bench_recv_all(fd, &token, 1) || token != 'D')
 			goto out;
 
 		/*
@@ -476,7 +386,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "%02x", buf[i]);
 		fprintf(stderr, "\n");
 
-		if (send_all(fd, &result, sizeof(result)))
+		if (tbv_bench_send_all(fd, &result, sizeof(result)))
 			goto out;
 		printf("recv_check result=%d size=%zu matched=%zu\n",
 		       result, o.size, matched_run);

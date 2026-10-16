@@ -45,3 +45,8 @@ Flake exports:
 
 The same names are exposed under `legacyPackages.${system}` for NixOS configs
 that cannot conveniently read flake `lib` attributes.
+
+`0010-thunderbolt-trace-XDomain-route-matching.patch` is a manual diagnostic
+patch. It traces XDomain response matching and is deliberately absent from
+both active stacks. Apply it separately when investigating route matching;
+its applicability must be checked against the target kernel.

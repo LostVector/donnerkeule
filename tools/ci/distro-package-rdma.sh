@@ -148,9 +148,10 @@ build_provider() {
 	# Our patches were generated against v62.0 but apply (with offset/fuzz) to
 	# older rdma-core down to at least v39 (Ubuntu 22.04). Patch 1 only adds
 	# new files; 2 and 3 absorb hunk drift automatically.
-	for p in "$repo_root/packaging/rdma-core-patches"/*.patch; do
-		( cd "$src" && patch --silent -p1 < "$p" )
-	done
+	while IFS= read -r name; do
+		[[ -n "$name" ]] || continue
+		( cd "$src" && patch --silent -p1 < "$repo_root/packaging/rdma-core-patches/$name" )
+	done < "$repo_root/packaging/rdma-core-patches/series"
 
 	rm -rf "$build"
 	mkdir "$build"

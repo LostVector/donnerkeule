@@ -488,35 +488,6 @@ void tbv_tbnet_minimal_recompute_state_locked(struct tbv_tbnet_identity *identit
 	identity->state = state;
 }
 
-bool tbv_tbnet_minimal_neighbor_ready(struct tbv_tbnet_identity *identity,
-				      const uuid_t *remote_uuid)
-{
-	struct tbv_tbnet_minimal_session *session;
-	bool ready = false;
-
-	if (identity->mode != TBV_TBNET_ID_MINIMAL_PACKET)
-		return false;
-
-	mutex_lock(&identity->lock);
-	if (!identity->proxy_ipv4)
-		goto out;
-
-	list_for_each_entry(session, &identity->minimal_sessions, node) {
-		if (!READ_ONCE(session->path_enabled) ||
-		    !READ_ONCE(session->neighbor_seen))
-			continue;
-		if (remote_uuid &&
-		    !uuid_equal(session->xd->remote_uuid, remote_uuid))
-			continue;
-		ready = true;
-		break;
-	}
-
-out:
-	mutex_unlock(&identity->lock);
-	return ready;
-}
-
 bool tbv_tbnet_minimal_path_ready(struct tbv_tbnet_identity *identity,
 				  const uuid_t *remote_uuid)
 {

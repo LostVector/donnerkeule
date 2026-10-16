@@ -84,14 +84,6 @@ tbv_service_create_dir_common(const uuid_t *uuid, u32 prtcid, u32 prtcvers,
 	return dir;
 }
 
-struct tb_property_dir *tbv_service_create_native_dir(void)
-{
-	return tbv_service_create_dir_common(&tbv_native_service_uuid,
-					     TBV_NATIVE_PRTCID,
-					     TBV_NATIVE_PRTCVERS,
-					     TBV_NATIVE_PRTCREVS, 0);
-}
-
 struct tb_property_dir *tbv_service_create_apple_dir(u32 prtcstns)
 {
 	struct tb_property_dir *dir;

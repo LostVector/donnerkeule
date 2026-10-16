@@ -6,6 +6,7 @@
 
 #include "../proto/native_wire.h"
 #include "tbv.h"
+#include "verbs_control.h"
 
 static u32 tbv_debugfs_wire_path_flags(const struct tbv_path *path)
 {
@@ -116,6 +117,11 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   state->native_fragment_striping);
 	seq_printf(s, "native_write_striping: %u\n",
 		   state->native_write_striping);
+	seq_printf(s, "gpu_direct: %u\n", tbv_gpu_direct_enabled());
+	seq_printf(s, "gpu_direct_work_kicks: %llu\n", tbv_gpu_direct_work_kicks());
+	seq_printf(s, "gpu_direct_wait_after_kick: %llu\n",
+		   tbv_gpu_direct_wait_after_kick());
+	tbv_dmabuf_debugfs_show(s);
 	seq_printf(s, "native_write_stripe_min_bytes: %u\n",
 		   state->native_write_stripe_min_bytes);
 	seq_printf(s, "native_domain_mask: 0x%x\n", state->native_domain_mask);
@@ -409,6 +415,7 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 			   peer->xd && peer->xd->tb ? peer->xd->tb->index : -1,
 			   peer->remote_host_known ? peer->remote_host_id :
 			   (const u8[16]){ 0 });
+		tbv_control_debugfs_show(s, peer);
 
 		list_for_each_entry(rail, &peer->rails, node) {
 			bool service_ready;
@@ -537,6 +544,7 @@ int tbv_debugfs_init(struct tbv_state *state)
 			    &tbv_debugfs_summary_fops);
 	debugfs_create_file("peers", 0444, state->debugfs_dir, state,
 			    &tbv_debugfs_peers_fops);
+	tbv_control_debugfs_init(state, state->debugfs_dir);
 	debugfs_create_file("configured_links", 0444, state->debugfs_dir,
 			    state, &tbv_debugfs_configured_links_fops);
 	return 0;
@@ -544,6 +552,7 @@ int tbv_debugfs_init(struct tbv_state *state)
 
 void tbv_debugfs_exit(struct tbv_state *state)
 {
+	tbv_control_debugfs_exit();
 	debugfs_remove_recursive(state->debugfs_dir);
 	state->debugfs_dir = NULL;
 }

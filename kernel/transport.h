@@ -9,9 +9,6 @@ struct tbv_transport_ops {
 	enum tbv_backend_type type;
 	const char *name;
 	int (*validate_config)(const struct tbv_cfg_link *link);
-	int (*activate)(struct tbv_state *state, const struct tbv_cfg_link *link);
-	void (*deactivate)(struct tbv_state *state,
-			   const struct tbv_cfg_link *link);
 };
 
 extern const struct tbv_backend_ops tbv_native_backend_ops;

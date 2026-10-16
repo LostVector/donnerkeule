@@ -1,17 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * usb4_rdma userspace verbs provider — Tier 1 skeleton.
+ * Userspace verbs provider for the TBV kernel RDMA devices.
  *
- * Tracks the kernel-side ibdev.c: most data-plane verbs return
- * the kernel's -ENOSYS straight to the application. Just enough
- * here for `ibv_devinfo` to find and open the device, and for
- * `ibv_alloc_pd`/`ibv_dealloc_pd` to round-trip through the
- * generic uverbs ioctl machinery.
+ * Standard verbs commands are forwarded through the generic kernel
+ * uverbs interface, including QPs, MRs, DMA-BUF registration and CQ events.
  *
- * Matching: prefer the fixed module node GUIDs, with the kernel device names
- * as a fallback. We do not have an upstream RDMA_DRIVER_USB4_RDMA enum value
- * yet, and distro rdma-core udev rules may rename the devices away from
- * usb4_rdmaN/usb4_appleN.
+ * Device matching accepts kernel device names or fixed module node GUIDs.
+ * Context allocation uses RDMA_DRIVER_UNKNOWN.
  */
 
 #include <errno.h>
@@ -28,7 +23,7 @@
 
 static void usb4_rdma_free_context(struct ibv_context *ibv_ctx);
 
-/* ----- query stubs ------------------------------------------------ */
+/* ----- device queries --------------------------------------------- */
 
 static int usb4_rdma_query_device(struct ibv_context *ctx,
 				  const struct ibv_query_device_ex_input *in,

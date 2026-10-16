@@ -42,7 +42,8 @@ int tbv_core_init(struct tbv_state *state,
 	state->next_peer_id = 1;
 	get_random_bytes(state->native_host_id, sizeof(state->native_host_id));
 	state->workqueue = alloc_workqueue("tbv_ibdev",
-					   WQ_UNBOUND | WQ_MEM_RECLAIM |
+					   WQ_UNBOUND |
+						   (tbv_dmabuf_verbs_enabled() ? 0 : WQ_MEM_RECLAIM) |
 						   WQ_HIGHPRI,
 					   0);
 	if (!state->workqueue) {
