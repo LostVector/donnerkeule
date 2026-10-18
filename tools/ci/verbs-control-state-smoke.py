@@ -32,6 +32,17 @@ functions = "\n".join(
                  "tbv_control_wait_done")
 )
 
+fault_decl = "\n".join(extract(pattern) for pattern in (
+    r"^enum tbv_fault_kind \{[\s\S]*?^\};", r"^enum tbv_fault_action \{[\s\S]*?^\};",
+    r"^static const char \* const fault_kind_names\[\][\s\S]*?^\};",
+    r"^static const char \* const fault_action_names\[\][\s\S]*?^\};",
+    r"^struct tbv_fault_rule \{[\s\S]*?^\};",
+))
+fault_decl += "static spinlock_t fault_lock;\nstatic atomic_t fault_armed;\n"
+fault_decl += "static struct tbv_fault_rule fault_rules[FAULT_KINDS];\n"
+fault_decl += "\n".join(extract(rf"^static [^\n]*\b{name}\([^;{{]*?^\{{[\s\S]*?^\}}")
+                       for name in ("tbv_fault_take", "tbv_fault_parse"))
+
 shim = r"""
 #include <assert.h>
 #include <stdio.h>
@@ -52,6 +63,21 @@ struct list_head { struct list_head *next, *prev; };
 #define complete_all(c) ((c)->calls++)
 #define wake_up_all(w) ((void)(w))
 #define atomic64_inc(c) (++*(c))
+typedef int atomic_t;
+#define atomic_read(a) (*(a))
+#define atomic_inc(a) (++*(a))
+#define atomic_dec(a) (--*(a))
+#define atomic_set(a, v) (*(a) = (v))
+#define DEFINE_SPINLOCK(name) spinlock_t name
+static int kstrtou32(const char *s, unsigned int base, u32 *res) {
+    char *end;
+    unsigned long v;
+    if (!*s) return -EINVAL;
+    v = strtoul(s, &end, base);
+    if (*end || v > 0xffffffffu) return -EINVAL;
+    *res = v;
+    return 0;
+}
 #define msecs_to_jiffies(ms) (ms)
 #define kfree(p) free(p)
 #define list_for_each_entry(pos, head, member) \
@@ -206,6 +232,29 @@ int main(void) {
     assert(tbv_control_wait_done(other, 0) == -ENOTCONN);
     tbv_control_close(other);
     assert(!ctrl.nr_pending && ctrl.pending.next == &ctrl.pending);
+    /* Fault injection: skip, count, expiry, replacement, bad input. */
+    {
+        char drop[] = "commit drop count=2 skip=1", dup[] = "done dup ms=5";
+        char bad1[] = "commit explode", bad2[] = "credit delay", bad3[] = "nope drop";
+        char bad4[] = "release drop count=0", bad5[] = "release drop bogus=1";
+        char clear[] = "clear";
+        u32 ms = 0;
+        assert(tbv_fault_take(FAULT_COMMIT, &ms) == FAULT_NONE && !fault_armed);
+        assert(tbv_fault_parse(bad1) && tbv_fault_parse(bad2) && tbv_fault_parse(bad3));
+        assert(tbv_fault_parse(bad4) && tbv_fault_parse(bad5) && !fault_armed);
+        assert(!tbv_fault_parse(drop) && !tbv_fault_parse(dup) && fault_armed == 2);
+        assert(tbv_fault_take(FAULT_COMMIT, &ms) == FAULT_NONE); /* skipped */
+        assert(tbv_fault_take(FAULT_CREDIT, &ms) == FAULT_NONE); /* other kind */
+        assert(tbv_fault_take(FAULT_COMMIT, &ms) == FAULT_DROP);
+        assert(tbv_fault_take(FAULT_COMMIT, &ms) == FAULT_DROP && fault_armed == 1);
+        assert(tbv_fault_take(FAULT_COMMIT, &ms) == FAULT_NONE);
+        assert(tbv_fault_take(FAULT_DONE, &ms) == FAULT_DUP && ms == 5 && !fault_armed);
+        assert(tbv_fault_take(FAULT_DONE, &ms) == FAULT_NONE);
+        assert(fault_rules[FAULT_COMMIT].hits == 2 && fault_rules[FAULT_DONE].hits == 1);
+        strcpy(drop, "commit drop count=2 skip=1");
+        assert(!tbv_fault_parse(drop) && fault_armed == 1 && !tbv_fault_parse(clear) && !fault_armed);
+        assert(tbv_fault_take(FAULT_COMMIT, &ms) == FAULT_NONE);
+    }
     puts("Verbs control state: PASS (capabilities, early/duplicate/late DONE, generation/batch isolation, errors, STATUS, disconnect)");
     return 0;
 }
@@ -214,7 +263,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix="tbv-control-state-") as directory:
     source = pathlib.Path(directory) / "smoke.c"
     binary = pathlib.Path(directory) / "smoke"
-    source.write_text(shim + declarations + control + functions + cases)
+    source.write_text(shim + declarations + fault_decl + control + functions + cases)
     subprocess.run([
         *shlex.split(os.environ.get("CC", "cc")), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-g",
         "-fsanitize=address,undefined", "-I", str(ROOT), str(source),

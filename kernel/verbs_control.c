@@ -14,6 +14,8 @@
 #include <linux/sort.h>
 #include <linux/thunderbolt.h>
 #include <linux/timekeeping.h>
+#include <linux/uaccess.h>
+#include <linux/workqueue.h>
 
 #include "tbv.h"
 #include "verbs_control.h"
@@ -937,6 +939,253 @@ int tbv_control_wait_done(struct tbv_ctrl_pending *p, u32 timeout_ms)
 	return ret;
 }
 
+/* Opt-in fault injection for qualification: module parameter dmabuf_fault drops, fails,
+ * delays or duplicates the next pushed notifications of one type. It is
+ * off until a rule is written and only touches what this host transmits. */
+enum tbv_fault_kind {
+	FAULT_CREDIT, FAULT_CANCEL, FAULT_COMMIT, FAULT_RELEASE, FAULT_DONE,
+	FAULT_KINDS,
+};
+
+enum tbv_fault_action {
+	FAULT_NONE, FAULT_DROP, FAULT_FAIL, FAULT_DELAY, FAULT_DUP,
+};
+
+static const char * const fault_kind_names[] = {
+	"credit", "cancel", "commit", "release", "done",
+};
+
+static const char * const fault_action_names[] = {
+	"none", "drop", "fail", "delay", "dup",
+};
+
+struct tbv_fault_rule {
+	enum tbv_fault_action action;
+	u32 skip, count, ms;
+	u64 hits;
+};
+
+struct tbv_fault_late {
+	struct list_head node;
+	struct delayed_work work;
+	struct tbv_control *ctrl;
+	u8 packet[TBV_DMABUF_WIRE_SIZE];
+};
+
+static DEFINE_SPINLOCK(fault_lock);
+static struct tbv_fault_rule fault_rules[FAULT_KINDS];
+static LIST_HEAD(fault_late);
+static struct workqueue_struct *fault_wq;
+static atomic_t fault_armed = ATOMIC_INIT(0);
+
+/* Consume one message of this kind: the action to apply, if its turn came.
+ * skip messages pass first; count messages are then affected. */
+static enum tbv_fault_action tbv_fault_take(enum tbv_fault_kind kind, u32 *ms)
+{
+	struct tbv_fault_rule *r = &fault_rules[kind];
+	enum tbv_fault_action action = FAULT_NONE;
+	unsigned long flags;
+
+	if (!atomic_read(&fault_armed))
+		return FAULT_NONE;
+	spin_lock_irqsave(&fault_lock, flags);
+	if (r->action != FAULT_NONE) {
+		if (r->skip) {
+			r->skip--;
+		} else {
+			action = r->action;
+			*ms = r->ms;
+			r->hits++;
+			if (!--r->count) {
+				r->action = FAULT_NONE;
+				atomic_dec(&fault_armed);
+			}
+		}
+	}
+	spin_unlock_irqrestore(&fault_lock, flags);
+	return action;
+}
+
+/* "<kind> <action> [count=N] [skip=N] [ms=N]", or "clear". */
+static int tbv_fault_parse(char *line)
+{
+	struct tbv_fault_rule rule = { .count = 1 };
+	char *word = strsep(&line, " \t\n");
+	enum tbv_fault_kind kind;
+	unsigned long flags;
+	u32 i, value;
+
+	if (!word)
+		return -EINVAL;
+	if (!strcmp(word, "clear")) {
+		spin_lock_irqsave(&fault_lock, flags);
+		for (i = 0; i < FAULT_KINDS; i++)
+			memset(&fault_rules[i], 0, sizeof(fault_rules[i]));
+		atomic_set(&fault_armed, 0);
+		spin_unlock_irqrestore(&fault_lock, flags);
+		return 0;
+	}
+	for (kind = 0; kind < FAULT_KINDS; kind++)
+		if (!strcmp(word, fault_kind_names[kind]))
+			break;
+	word = strsep(&line, " \t\n");
+	if (kind == FAULT_KINDS || !word)
+		return -EINVAL;
+	for (i = FAULT_DROP; i <= FAULT_DUP; i++)
+		if (!strcmp(word, fault_action_names[i]))
+			rule.action = i;
+	if (!rule.action)
+		return -EINVAL;
+	while ((word = strsep(&line, " \t\n"))) {
+		u32 *field;
+
+		if (!*word)
+			continue;
+		if (!strncmp(word, "count=", 6))
+			field = &rule.count;
+		else if (!strncmp(word, "skip=", 5))
+			field = &rule.skip;
+		else if (!strncmp(word, "ms=", 3))
+			field = &rule.ms;
+		else
+			return -EINVAL;
+		if (kstrtou32(strchr(word, '=') + 1, 0, &value))
+			return -EINVAL;
+		*field = value;
+	}
+	if (!rule.count || rule.ms > 10000 || (rule.action == FAULT_DELAY && !rule.ms))
+		return -EINVAL;
+	spin_lock_irqsave(&fault_lock, flags);
+	if (fault_rules[kind].action == FAULT_NONE)
+		atomic_inc(&fault_armed);
+	rule.hits = fault_rules[kind].hits;
+	fault_rules[kind] = rule;
+	spin_unlock_irqrestore(&fault_lock, flags);
+	return 0;
+}
+
+static void tbv_fault_late_work(struct work_struct *work)
+{
+	struct tbv_fault_late *late = container_of(work, struct tbv_fault_late, work.work);
+	struct tbv_control *ctrl = late->ctrl;
+	unsigned long flags;
+
+	spin_lock_irqsave(&fault_lock, flags);
+	list_del(&late->node);
+	spin_unlock_irqrestore(&fault_lock, flags);
+	if (READ_ONCE(ctrl->running) && !READ_ONCE(ctrl->failure))
+		tb_xdomain_response(ctrl->xd, late->packet, sizeof(late->packet),
+				    TB_CFG_PKG_XDOMAIN_RESP);
+	tbv_control_put(ctrl);
+	kfree(late);
+}
+
+static void tbv_fault_send_late(struct tbv_control *ctrl, const u8 *packet, u32 ms)
+{
+	struct tbv_fault_late *late = fault_wq ? kzalloc(sizeof(*late), GFP_KERNEL) : NULL;
+	unsigned long flags;
+
+	if (!late)
+		return;
+	memcpy(late->packet, packet, sizeof(late->packet));
+	late->ctrl = ctrl;
+	tbv_control_get(ctrl);
+	INIT_DELAYED_WORK(&late->work, tbv_fault_late_work);
+	spin_lock_irqsave(&fault_lock, flags);
+	list_add_tail(&late->node, &fault_late);
+	spin_unlock_irqrestore(&fault_lock, flags);
+	queue_delayed_work(fault_wq, &late->work, msecs_to_jiffies(ms));
+}
+
+static void tbv_fault_flush(void)
+{
+	struct tbv_fault_late *late, *next;
+	LIST_HEAD(canceled);
+	unsigned long flags;
+
+	/* A cancelled entry is ours to free. One that already started
+	 * unlinks itself under the lock, so stays on the list until then. */
+	spin_lock_irqsave(&fault_lock, flags);
+	list_for_each_entry_safe(late, next, &fault_late, node)
+		if (cancel_delayed_work(&late->work))
+			list_move(&late->node, &canceled);
+	spin_unlock_irqrestore(&fault_lock, flags);
+	list_for_each_entry_safe(late, next, &canceled, node) {
+		tbv_control_put(late->ctrl);
+		kfree(late);
+	}
+	/* Waits for a delayed send that already started. */
+	if (fault_wq) {
+		destroy_workqueue(fault_wq);
+		fault_wq = NULL;
+	}
+}
+
+/* One pushed notification on XDomain, subject to any armed fault. */
+static int tbv_ctrl_respond(struct tbv_control *ctrl, enum tbv_fault_kind kind,
+			    u8 *packet)
+{
+	enum tbv_fault_action action;
+	u32 ms = 0;
+
+	action = tbv_fault_take(kind, &ms);
+	if (action == FAULT_DROP)
+		return 0;
+	if (action == FAULT_FAIL)
+		return -EIO;
+	if (action == FAULT_DELAY) {
+		tbv_fault_send_late(ctrl, packet, ms);
+		return 0;
+	}
+	if (action == FAULT_DUP && !ms)
+		tb_xdomain_response(ctrl->xd, packet, TBV_DMABUF_WIRE_SIZE,
+				    TB_CFG_PKG_XDOMAIN_RESP);
+	else if (action == FAULT_DUP)
+		tbv_fault_send_late(ctrl, packet, ms);
+	return tb_xdomain_response(ctrl->xd, packet, TBV_DMABUF_WIRE_SIZE,
+				   TB_CFG_PKG_XDOMAIN_RESP);
+}
+
+/* A module parameter, not debugfs: lockdown hides writable debugfs files. */
+static int tbv_fault_set(const char *value, const struct kernel_param *kp)
+{
+	char *line = kstrdup(value, GFP_KERNEL);
+	int ret;
+
+	if (!line)
+		return -ENOMEM;
+	ret = tbv_fault_parse(line);
+	kfree(line);
+	return ret;
+}
+
+static int tbv_fault_get(char *buf, const struct kernel_param *kp)
+{
+	enum tbv_fault_kind kind;
+	unsigned long flags;
+	int size = 0;
+
+	spin_lock_irqsave(&fault_lock, flags);
+	for (kind = 0; kind < FAULT_KINDS; kind++) {
+		struct tbv_fault_rule *r = &fault_rules[kind];
+
+		size += scnprintf(buf + size, PAGE_SIZE - size,
+				  "%s: action=%s skip=%u count=%u ms=%u hits=%llu\n",
+				  fault_kind_names[kind], fault_action_names[r->action],
+				  r->skip, r->count, r->ms, r->hits);
+	}
+	spin_unlock_irqrestore(&fault_lock, flags);
+	return size;
+}
+
+static const struct kernel_param_ops tbv_fault_ops = {
+	.set = tbv_fault_set,
+	.get = tbv_fault_get,
+};
+module_param_cb(dmabuf_fault, &tbv_fault_ops, NULL, 0600);
+MODULE_PARM_DESC(dmabuf_fault,
+	"Test only: write '<credit|cancel|commit|release|done> <drop|fail|delay|dup> [count=N] [skip=N] [ms=N]' or 'clear' to fault pushed notifications this host sends; read the rules and hits");
+
 /* Credits require pushed notifications on XDomain from both peers. */
 bool tbv_control_credits(const struct tbv_control *ctrl)
 {
@@ -956,8 +1205,11 @@ int tbv_control_notify(struct tbv_control *ctrl, const struct tbv_dmabuf_wire *m
 		return -ENOTCONN;
 	ret = tbv_dmabuf_wire_build(packet, sizeof(packet), m, ctrl->xd->route);
 	if (ret >= 0)
-		ret = tb_xdomain_response(ctrl->xd, packet, sizeof(packet),
-					 TB_CFG_PKG_XDOMAIN_RESP);
+		ret = tbv_ctrl_respond(ctrl, m->op == (TBV_DMABUF_COMMIT | TBV_DMABUF_REPLY) ?
+				       FAULT_COMMIT :
+				       m->op == (TBV_DMABUF_RELEASE | TBV_DMABUF_REPLY) ?
+				       FAULT_RELEASE : m->status < 0 ? FAULT_CANCEL :
+				       FAULT_CREDIT, packet);
 	atomic64_inc(&ctrl->counters[ret ? CTRL_NOTIFY_FAILED : CTRL_TX]);
 	return ret;
 }
@@ -981,8 +1233,7 @@ void tbv_control_done(struct tbv_control *ctrl, const struct tbv_dmabuf_wire *re
 			return;
 		ret = tbv_dmabuf_wire_build(packet, sizeof(packet), &m, ctrl->xd->route);
 		if (ret >= 0)
-			ret = tb_xdomain_response(ctrl->xd, packet, sizeof(packet),
-						 TB_CFG_PKG_XDOMAIN_RESP);
+			ret = tbv_ctrl_respond(ctrl, FAULT_DONE, packet);
 		if (ret)
 			/* Cached placement remains valid. The source can recover
 			 * a dropped/unallocatable notification with STATUS. */
@@ -1192,11 +1443,16 @@ void tbv_control_debugfs_init(struct tbv_state *state, struct dentry *dir)
 	ctrl_bench_state = state;
 	mutex_unlock(&ctrl_bench_lock);
 	debugfs_create_file("dmabuf_control_bench", 0400, dir, state, &tbv_ctrl_bench_fops);
+	fault_wq = alloc_workqueue("tbv_fault", WQ_UNBOUND, 1);
 }
 
 void tbv_control_debugfs_exit(void)
 {
+	char clear[] = "clear";
+
 	mutex_lock(&ctrl_bench_lock);
 	ctrl_bench_state = NULL;
 	mutex_unlock(&ctrl_bench_lock);
+	tbv_fault_parse(clear);
+	tbv_fault_flush();
 }
