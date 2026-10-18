@@ -278,6 +278,13 @@ int main(void) {
     tbv_dmabuf_credit_work(NULL);
     assert(dmabuf_engine.rx.state == TBV_DMABUF_RX_SPECULATIVE && !dmabuf_engine.want_owner);
     assert(last_notify.credit == 2 && last_notify.hdr.psn == 42);
+    /* STATUS before COMMIT: the frames may be placed, COMMIT is in flight. */
+    struct tbv_dmabuf_wire st = last_notify;
+    st.op = TBV_DMABUF_STATUS; st.credit = 0; st.token = 104;
+    assert(tbv_dmabuf_control_request(&peer, &ctrl, &st) == TBV_DMABUF_BUSY);
+    assert(dmabuf_engine.rx.state == TBV_DMABUF_RX_SPECULATIVE);
+    st.hdr.psn = 99;
+    assert(tbv_dmabuf_control_request(&peer, &ctrl, &st) == -ENOENT);
     /* A PREPARE that raced the credit adopts it; READY names the credit. */
     struct tbv_dmabuf_wire p = last_notify;
     p.op = TBV_DMABUF_PREPARE; p.credit = 0; p.token = 102;

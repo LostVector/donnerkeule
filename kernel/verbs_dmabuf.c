@@ -1652,6 +1652,14 @@ int tbv_dmabuf_control_request(struct tbv_peer *peer, struct tbv_control *ctrl,
 	} else if (tbv_dmabuf_rx_cached(m)) {
 		m->status = m->op == TBV_DMABUF_ABORT ? -ECANCELED :
 			    dmabuf_engine.rx.last_status ?: TBV_DMABUF_DONE;
+	} else if (m->op == TBV_DMABUF_STATUS &&
+		   dmabuf_engine.rx.state == TBV_DMABUF_RX_SPECULATIVE &&
+		   !dmabuf_engine.rx.released && !dmabuf_engine.rx.cancel_sent &&
+		   tbv_dmabuf_credit_match(&dmabuf_engine.rx.request, m)) {
+		/* The sender used the armed credit and its frames may already be
+		 * placed, but COMMIT is still in flight. Not an unknown WR: let
+		 * the sender keep waiting instead of failing it and its rails. */
+		m->status = TBV_DMABUF_BUSY;
 	} else if (!tbv_dmabuf_rx_active(&dmabuf_engine.rx) ||
 		   !tbv_dmabuf_same(&dmabuf_engine.rx.request, m, true)) {
 		m->status = -ENOENT;
