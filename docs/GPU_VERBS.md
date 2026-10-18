@@ -306,9 +306,34 @@ betroffenen Rails gestoppt. Beide Testmodule bzw. physischen Verbindungen müsse
 danach neu geladen werden. Saubere, vollständig abgeschlossene WRs und saubere
 QP-Wechsel verbrauchen die Rails dagegen nicht.
 
-Weitere offene Qualifikation: Verlustinjektion, Hot-Unplug, GPU-Reset,
-IOMMU-Fehler, parallele QPs, dauerhafte Serving-Last und Wiederverbindung mit
-Generationen. Der Modus ist derzeit für vertraute native Testpeers vorgesehen.
+Weitere offene Qualifikation: physisches Hot-Unplug, GPU-Reset,
+IOMMU-Fehler, parallele QPs und dauerhafte Serving-Last. Der Modus ist derzeit
+für vertraute native Testpeers vorgesehen.
+
+### Verlust und Wiederverbindung (Stand 18. Oktober)
+
+Das Modulparameter-Werkzeug `dmabuf_fault` (nur Test, standardmäßig leer; kein
+debugfs, weil Lockdown beschreibbare debugfs-Dateien sperrt) verwirft,
+verzögert, dupliziert oder lässt scheitern die nächsten Meldungen eines Typs,
+die dieser Host sendet:
+`echo "commit delay ms=50 count=1 skip=20" > /sys/module/thunderbolt_ibverbs/parameters/dmabuf_fault`.
+Typen: `credit cancel commit release done`; Aktionen: `drop fail delay dup`;
+`clear` löscht alle Regeln, Lesen zeigt Regeln und Treffer. `peers` zeigt je
+Rail `gpu_stopped=1` für stillgelegte Rails, und der Kernel meldet das Stilllegen.
+
+Ohne Neuladen überstehen: verlorenes, verzögertes oder doppeltes DONE (STATUS),
+verlorenes, verzögertes oder doppeltes CREDIT (PREPARE übernimmt, CANCEL trägt
+alle Daten), verlorenes CANCEL (BUSY löst die Freigabe aus), RELEASE bis
+300 ms, COMMIT bis mindestens 2 s Verzögerung (STATUS antwortet BUSY, solange
+ein passender Credit auf sein COMMIT wartet), QP-Zerstörung, Prozess-Kill und
+Neuladen des Peer-Moduls bei armiertem Credit. Stillgelegt werden die Rails
+beider Seiten bei: verlorenem COMMIT, verlorenem RELEASE oder RELEASE nach über
+500 ms, CREDIT und CANCEL gemeinsam verloren, fehlgeschlagenem Senden einer
+CREDIT-, CANCEL-, COMMIT- oder RELEASE-Meldung, doppeltem COMMIT oder RELEASE,
+Prozess-Kill während einer Übertragung und Abbau eines Links. Danach müssen
+beide Module neu geladen werden; ein erneutes Binden der Dienste genügt nicht.
+Offene WRs der Gegenseite können dabei 30 s und länger ohne Fehler-CQE
+bleiben. Einzelheiten: `bench/results/2026-10-18-verbs-loss.md`.
 
 ## Build und Test
 
