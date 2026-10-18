@@ -392,7 +392,6 @@ static ssize_t activate_store(struct config_item *item, const char *buf,
 			      size_t count)
 {
 	struct tbv_cfgfs_link *link = tbv_cfgfs_to_link(item);
-	const struct tbv_transport_ops *ops;
 	enum tbv_backend_type backend;
 	int ret;
 
@@ -402,39 +401,23 @@ static ssize_t activate_store(struct config_item *item, const char *buf,
 	mutex_lock(&link->lock);
 	backend = link->cfg.backend == TBV_CFG_BACKEND_NATIVE ?
 		  TBV_BACKEND_NATIVE : TBV_BACKEND_APPLE;
-	ops = tbv_transport_get(backend);
-	if (!ops || !ops->activate) {
-		ret = -EINVAL;
-		goto unlock;
-	}
-
 	if (link->cfg.state != TBV_CFG_SEALED) {
 		ret = -EINVAL;
 		goto unlock;
 	}
 
-	ret = ops->activate(link->state, &link->cfg);
+	ret = tbv_cfg_link_activate(&link->cfg);
 	if (ret)
 		goto unlock;
 
-	ret = tbv_cfg_link_activate(&link->cfg);
-	if (ret) {
-		if (ops->deactivate)
-			ops->deactivate(link->state, &link->cfg);
-		goto unlock;
-	}
-
 	ret = tbv_link_activate_config(link->state, config_item_name(item),
 				       backend, &link->cfg);
-	if (ret) {
+	if (ret)
 		tbv_cfg_link_deactivate(&link->cfg);
-		if (ops->deactivate)
-			ops->deactivate(link->state, &link->cfg);
-	}
 unlock:
 	mutex_unlock(&link->lock);
 	trace_tbv_cfgfs_link_op(config_item_name(item), "activate", ret);
-	return ret ? ret : count;
+	return ret ? ret : (ssize_t)count;
 }
 
 static struct configfs_attribute tbv_cfgfs_attr_backend = {
@@ -512,14 +495,9 @@ static struct configfs_attribute *tbv_cfgfs_link_attrs[] = {
 static void tbv_cfgfs_link_release(struct config_item *item)
 {
 	struct tbv_cfgfs_link *link = tbv_cfgfs_to_link(item);
-	const struct tbv_transport_ops *ops;
 
 	if (link->cfg.state == TBV_CFG_ACTIVE) {
-		ops = tbv_transport_get(link->cfg.backend == TBV_CFG_BACKEND_NATIVE ?
-					TBV_BACKEND_NATIVE : TBV_BACKEND_APPLE);
 		tbv_link_deactivate_config(link->state, link->cfg.link_id);
-		if (ops && ops->deactivate)
-			ops->deactivate(link->state, &link->cfg);
 		tbv_cfg_link_deactivate(&link->cfg);
 	}
 	mutex_destroy(&link->lock);

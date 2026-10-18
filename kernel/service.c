@@ -13,6 +13,7 @@
 #include <linux/uuid.h>
 
 #include "tbv.h"
+#include "verbs_control.h"
 
 const uuid_t tbv_native_service_uuid =
 	UUID_INIT(0x7c2c8f1e, 0x5b4d, 0x4a01, 0x9f, 0x3a,
@@ -82,14 +83,6 @@ tbv_service_create_dir_common(const uuid_t *uuid, u32 prtcid, u32 prtcvers,
 	}
 
 	return dir;
-}
-
-struct tb_property_dir *tbv_service_create_native_dir(void)
-{
-	return tbv_service_create_dir_common(&tbv_native_service_uuid,
-					     TBV_NATIVE_PRTCID,
-					     TBV_NATIVE_PRTCVERS,
-					     TBV_NATIVE_PRTCREVS, 0);
 }
 
 struct tb_property_dir *tbv_service_create_apple_dir(u32 prtcstns)
@@ -540,6 +533,37 @@ static void tbv_service_remove(struct tb_service *svc)
 	kfree(binding);
 }
 
+/*
+ * Reboot/poweroff hook, as thunderbolt_net has. Without it the rings stay
+ * allocated through device_shutdown() and the NHI's own shutdown warns about
+ * every one of them. Stops new TX and the control ring, stops the data rings,
+ * then runs the same path teardown as tbv_service_remove(): tunnel disabled,
+ * frames unmapped, rings freed. tbv_path_destroy() is idempotent, so the later
+ * remove finds nothing left to do. Never waits for verbs users: userspace is
+ * already gone, and a hung shutdown needs a power cycle. If the data rings
+ * cannot be stopped within the bounded wait, they are left for remove.
+ */
+static void tbv_service_shutdown(struct tb_service *svc)
+{
+	struct tbv_service_binding *binding = tb_service_get_drvdata(svc);
+	struct tbv_rail *rail;
+	int ret;
+
+	if (!tbv_service_state || !binding)
+		return;
+	rail = binding->rail;
+	mutex_lock(&tbv_service_state->lock);
+	rail->removing = true;
+	mutex_unlock(&tbv_service_state->lock);
+	tbv_control_stop(binding->peer);
+	tbv_native_control_cancel_rail(rail);
+	ret = tbv_dmabuf_quiesce_rail(rail);
+	if (!ret)
+		tbv_path_destroy(&rail->path, binding->peer->xd);
+	dev_info(&svc->dev, "shutdown: rings stopped%s, status %d\n",
+		 ret ? "" : " and freed", ret);
+}
+
 static const struct tb_service_id tbv_service_ids[] = {
 	{ TB_SERVICE(TBV_NATIVE_PROTOCOL_KEY, TBV_NATIVE_PRTCID),
 	  .driver_data = 0 },
@@ -608,6 +632,7 @@ static struct tb_service_driver tbv_service_driver = {
 	.probe = tbv_service_probe,
 #endif
 	.remove = tbv_service_remove,
+	.shutdown = tbv_service_shutdown,
 	.id_table = tbv_service_ids,
 };
 

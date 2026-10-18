@@ -7,9 +7,15 @@ KDIR ?= /lib/modules/$(KVER)/build
 PWD := $(shell pwd)
 
 obj-m := thunderbolt_ibverbs.o
-thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o ibdev.o link.o native.o apple.o trace.o native_control.o native_control_legacy.o native_control_xdomain.o path.o peer.o rail.o service.o tbnet_identity.o tbnet_minimal.o ../proto/config.o ../proto/identity.o ../proto/reliability.o
+thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o gpu_direct.o verbs_dmabuf.o verbs_control.o verbs_cq.o verbs_mr.o ibdev.o link.o native.o apple.o trace.o native_control.o native_control_legacy.o native_control_xdomain.o path.o peer.o rail.o service.o tbnet_identity.o tbnet_minimal.o ../proto/config.o ../proto/identity.o ../proto/reliability.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src) -I$(src)/..
+
+# Production may omit the detailed performance tracepoint entirely.
+TBV_PROFILING ?= 1
+ifeq ($(TBV_PROFILING),0)
+ccflags-y += -DTBV_DISABLE_PROFILING
+endif
 
 # Thunderbolt dropped the probe ID argument in Linux 7.3. Probe the actual
 # headers, including distro backports, instead of assuming a version boundary.
@@ -44,6 +50,7 @@ help:
 	@echo "  clean              Remove build artifacts"
 	@echo ""
 	@echo "Parameters:"
+	@echo "  TBV_PROFILING=0      Build without detailed performance tracepoints"
 	@echo "  compat=auto|force|off"
 	@echo "  profile=auto|mac_compat|linux_perf|mixed"
 	@echo "  tbnet=auto|allow|prefer_rdma|block"

@@ -125,7 +125,7 @@ MODULE_PARM_DESC(native_domain_mask,
 static bool register_verbs;
 module_param(register_verbs, bool, 0444);
 MODULE_PARM_DESC(register_verbs,
-		 "Register a guarded libibverbs device skeleton");
+		 "Register libibverbs devices for native and Apple-compatible rails");
 
 static struct tbv_state tbv_driver_state;
 
@@ -152,6 +152,24 @@ static int __init tbv_init(void)
 		return ret;
 
 	tbv_path_init_optional_symbols();
+	if (tbv_dmabuf_verbs_enabled() &&
+	    (tbv_gpu_direct_enabled() || !register_verbs ||
+	     !resolved.native_enabled || resolved.apple_enabled ||
+	     !bind_services || !allocate_rings || !start_rings ||
+	     !negotiate_native || !enable_tunnels || !native_data)) {
+		pr_err("dmabuf_verbs requires native-only transport, all path setup options and register_verbs=1\n");
+		ret = -EINVAL;
+		goto err_path_symbols;
+	}
+
+	if (tbv_gpu_direct_enabled() &&
+	    (register_verbs || !resolved.native_enabled || resolved.apple_enabled ||
+	     !bind_services || !allocate_rings || !start_rings ||
+	     !negotiate_native || !enable_tunnels || !native_data)) {
+		pr_err("gpu_direct requires native-only transport, all path setup options and register_verbs=0\n");
+		ret = -EINVAL;
+		goto err_path_symbols;
+	}
 
 	if (start_rings && !allocate_rings) {
 		pr_err("start_rings=1 requires allocate_rings=1\n");
@@ -205,9 +223,15 @@ static int __init tbv_init(void)
 	service_cfg.negotiate_native = negotiate_native;
 	service_cfg.enable_tunnels = enable_tunnels;
 
+	ret = tbv_dmabuf_start(&tbv_driver_state);
+	if (ret) {
+		tbv_core_exit(&tbv_driver_state);
+		goto err_path_symbols;
+	}
 	ret = tbv_services_start(&tbv_driver_state, bind_services,
 				 &service_cfg);
 	if (ret) {
+		tbv_dmabuf_stop();
 		tbv_core_exit(&tbv_driver_state);
 		goto err_path_symbols;
 	}
@@ -215,6 +239,7 @@ static int __init tbv_init(void)
 	ret = tbv_ibdev_start(&tbv_driver_state, register_verbs);
 	if (ret) {
 		tbv_services_stop(&tbv_driver_state);
+		tbv_dmabuf_stop();
 		tbv_core_exit(&tbv_driver_state);
 		goto err_path_symbols;
 	}
@@ -227,6 +252,15 @@ static int __init tbv_init(void)
 	else
 		snprintf(lanes_desc, sizeof(lanes_desc), "%u-%u",
 			 cfg.lanes_min, cfg.lanes_max);
+
+	ret = tbv_gpu_direct_start(&tbv_driver_state);
+	if (ret) {
+		tbv_ibdev_stop(&tbv_driver_state);
+		tbv_services_stop(&tbv_driver_state);
+		tbv_dmabuf_stop();
+		tbv_core_exit(&tbv_driver_state);
+		goto err_path_symbols;
+	}
 
 	pr_info("loaded compat=%s profile=%s resolved_profile=%s tbnet=%s tbnet_identity=%s tbnet_identity_minimal_e2e=%u tbnet_identity_minimal_apple_only=%u lanes=%s native_control=%s native_data=%u apple_data=%u native_fragment_striping=%u\n",
 		tbv_compat_name(cfg.compat),
@@ -251,8 +285,10 @@ err_path_symbols:
 
 static void __exit tbv_exit(void)
 {
+	tbv_gpu_direct_stop();
 	tbv_ibdev_stop(&tbv_driver_state);
 	tbv_services_stop(&tbv_driver_state);
+	tbv_dmabuf_stop();
 	tbv_core_exit(&tbv_driver_state);
 	tbv_path_exit_optional_symbols();
 	pr_info("unloaded\n");

@@ -11,6 +11,7 @@
 
 #include "../proto/native_wire.h"
 #include "tbv.h"
+#include "verbs_control.h"
 
 #define TBV_NATIVE_HELLO_RETRIES 5
 #define TBV_NATIVE_TUNNEL_RETRIES 20
@@ -32,6 +33,16 @@ static u32 tbv_native_control_caps(const struct tbv_state *state,
 		caps |= TBV_NATIVE_WIRE_CAP_RC;
 	if (peer->nr_rails > 1)
 		caps |= TBV_NATIVE_WIRE_CAP_MULTI_RAIL;
+	if (tbv_dmabuf_verbs_enabled())
+		caps |= TBV_NATIVE_WIRE_CAP_DMABUF_VERBS;
+	if (tbv_control_enabled())
+		caps |= TBV_NATIVE_WIRE_CAP_CONTROL_RING;
+	if (tbv_control_push_enabled())
+		caps |= TBV_NATIVE_WIRE_CAP_PUSH_DONE;
+	if (tbv_dmabuf_credits_enabled())
+		caps |= TBV_NATIVE_WIRE_CAP_DMABUF_CREDIT;
+	if (tbv_gpu_direct_enabled())
+		caps = TBV_NATIVE_WIRE_CAP_GPU_DIRECT | TBV_NATIVE_WIRE_CAP_MULTI_RAIL;
 
 	return caps;
 }
@@ -247,6 +258,14 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 	struct tbv_peer *peer;
 	int ret = -ENOENT;
 
+	if (!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) !=
+	    tbv_gpu_direct_enabled() ||
+	    !!(remote->capabilities & TBV_NATIVE_WIRE_CAP_DMABUF_VERBS) !=
+	    tbv_dmabuf_verbs_enabled() ||
+	    (tbv_dmabuf_verbs_enabled() && !remote->has_ids) ||
+	    (tbv_gpu_direct_enabled() && !remote->has_ids))
+		return -EPROTONOSUPPORT;
+
 	mutex_lock(&state->lock);
 	list_for_each_entry(peer, &state->peers, node) {
 		struct tbv_rail *rail;
@@ -255,6 +274,13 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 			continue;
 		if (!tbv_native_control_peer_matches_source(peer, source_xd))
 			continue;
+		/* A descriptor session cannot accept a restarted remote kernel on
+		 * existing raw rings. Recreate both connections after a restart. */
+		if (tbv_dmabuf_verbs_enabled() && peer->remote_host_known &&
+		    memcmp(peer->remote_host_id, remote->host_id, 16)) {
+			ret = -ESTALE;
+			goto out;
+		}
 
 		list_for_each_entry(rail, &peer->rails, node) {
 			if (rail->key.route != info->route)
@@ -264,6 +290,12 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 				continue;
 
 			rail->native_negotiated = true;
+			peer->remote_control_ring =
+				!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_CONTROL_RING);
+			peer->remote_push_done =
+				!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_PUSH_DONE);
+			peer->remote_dmabuf_credit =
+				!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_DMABUF_CREDIT);
 			rail->remote_rail_id = remote->rail_id;
 			rail->remote_transmit_path = remote->transmit_path;
 			rail->remote_tx_hop = remote->tx_hop;
@@ -303,6 +335,12 @@ static int tbv_native_control_mark_remote_ready(struct tbv_state *state,
 	struct tbv_peer *peer;
 	int ret = -ENOENT;
 
+	if (!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) !=
+	    tbv_gpu_direct_enabled() ||
+	    !!(remote->capabilities & TBV_NATIVE_WIRE_CAP_DMABUF_VERBS) !=
+	    tbv_dmabuf_verbs_enabled())
+		return -EPROTONOSUPPORT;
+
 	mutex_lock(&state->lock);
 	list_for_each_entry(peer, &state->peers, node) {
 		struct tbv_rail *rail;
@@ -311,6 +349,12 @@ static int tbv_native_control_mark_remote_ready(struct tbv_state *state,
 			continue;
 		if (!tbv_native_control_peer_matches_source(peer, source_xd))
 			continue;
+		if (tbv_dmabuf_verbs_enabled() &&
+		    (!remote->has_ids || (peer->remote_host_known &&
+		     memcmp(peer->remote_host_id, remote->host_id, 16)))) {
+			ret = -ESTALE;
+			goto out;
+		}
 
 		list_for_each_entry(rail, &peer->rails, node) {
 			if (rail->key.route != info->route ||
@@ -407,10 +451,19 @@ int tbv_native_control_handle_packet(struct tbv_state *state,
 
 	if (!state)
 		return 0;
+	if (tbv_control_handle_setup(state, source_xd, buf, size))
+		return 1;
+	if (tbv_dmabuf_handle_packet(state, source_xd, buf, size))
+		return 1;
 
 	ret = tbv_native_wire_parse_hello(buf, size, &remote, &info);
 	if (ret)
 		return 0;
+	if (!!(remote.capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) !=
+	    tbv_gpu_direct_enabled() ||
+	    !!(remote.capabilities & TBV_NATIVE_WIRE_CAP_DMABUF_VERBS) !=
+	    tbv_dmabuf_verbs_enabled())
+		return 1;
 
 	/*
 	 * A source-blind handler does not say which link a message came over;
@@ -677,28 +730,6 @@ static int tbv_native_control_enable_tunnel_once(struct tbv_peer *peer,
 	return ret;
 }
 
-int tbv_native_control_exchange(struct tbv_state *state, struct tbv_peer *peer,
-				struct tbv_rail *rail)
-{
-	u32 attempt;
-	int ret = 0;
-
-	for (attempt = 1; attempt <= TBV_NATIVE_HELLO_RETRIES; attempt++) {
-		ret = tbv_native_control_exchange_once(state, peer, rail,
-						       attempt);
-		if (!ret)
-			return 0;
-		if (ret != -ETIMEDOUT)
-			return ret;
-		if (attempt < TBV_NATIVE_HELLO_RETRIES)
-			msleep(TBV_NATIVE_HELLO_RETRY_DELAY_MS);
-	}
-
-	pr_warn("native HELLO route=0x%llx rail=0x%x timed out after %d attempts\n",
-		rail->key.route, rail->rail_id, TBV_NATIVE_HELLO_RETRIES);
-	return ret;
-}
-
 static void tbv_native_control_work(struct work_struct *work)
 {
 	struct tbv_rail *rail =
@@ -825,6 +856,24 @@ static void tbv_native_control_work(struct work_struct *work)
 		}
 	}
 
+	if (tbv_rail_data_ready(rail) && tbv_control_required(peer)) {
+		if (tbv_control_ready(peer)) {
+			rail->native_last_error = 0;
+			goto out;
+		}
+		attempt = ++rail->native_control_attempts;
+		ret = tbv_control_setup(peer);
+		if (ret && tbv_control_ready(peer))
+			ret = 0;
+		rail->native_last_error = ret;
+		if (ret) {
+			if (attempt < TBV_NATIVE_TUNNEL_RETRIES)
+				retry = true;
+			else
+				pr_warn("native descriptor control peer=%u failed after %u attempts: %d\n",
+					peer->peer_id, attempt, ret);
+		}
+	}
 out:
 	if (retry) {
 		mutex_lock(&state->lock);

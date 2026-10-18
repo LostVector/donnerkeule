@@ -2,7 +2,7 @@
 # Build the module the way non-Nix users will: inside a distro container,
 # against that distro's packaged kernel headers, through both plain make and
 # the documented Makefile DKMS targets, including installation and removal.
-# Also compiles the small userspace-facing protocol header smoke tests.
+# Also runs the shared protocol and production-state smoke tests with GCC.
 
 set -euo pipefail
 
@@ -46,15 +46,15 @@ install_deps() {
 		apt-get update -qq
 		DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
 			bash build-essential ca-certificates dkms file gcc git kmod \
-			linux-headers-amd64 make tar xz-utils
+			linux-headers-amd64 make python3 tar xz-utils
 	elif command -v dnf >/dev/null 2>&1; then
 		dnf install -y -q --setopt=install_weak_deps=False \
 			bash ca-certificates diffutils dkms file findutils gcc git \
-			kernel-devel kernel-headers kmod make openssl tar xz >/dev/null
+			kernel-devel kernel-headers kmod libasan libubsan make openssl python3 tar xz >/dev/null
 	elif command -v pacman >/dev/null 2>&1; then
 		pacman -Syu --noconfirm --needed \
 			base-devel ca-certificates dkms file gcc git kmod linux-headers \
-			make openssl pahole tar xz
+			make openssl pahole python tar xz
 	else
 		cat /etc/os-release >&2 || true
 		printf 'error: unsupported image; expected apt-get, dnf, or pacman\n' >&2
@@ -117,26 +117,7 @@ build_with_make() {
 }
 
 build_userspace_smoke() {
-	gcc -std=c11 -Wall -Wextra -Werror -I/work/src \
-		/work/src/tools/ci/proto-smoke.c \
-		-o /tmp/tbv-proto-smoke
-	/tmp/tbv-proto-smoke
-	gcc -std=c11 -Wall -Wextra -Werror -I/work/src \
-		/work/src/tools/ci/reliability-smoke.c \
-		/work/src/proto/reliability.c \
-		-o /tmp/tbv-reliability-smoke
-	/tmp/tbv-reliability-smoke
-	gcc -std=c11 -Wall -Wextra -Werror -I/work/src \
-		/work/src/tools/ci/identity-smoke.c \
-		/work/src/proto/identity.c \
-		-o /tmp/tbv-identity-smoke
-	/tmp/tbv-identity-smoke
-	gcc -std=c11 -Wall -Wextra -Werror -I/work/src \
-		/work/src/tools/ci/config-smoke.c \
-		/work/src/proto/config.c \
-		/work/src/proto/identity.c \
-		-o /tmp/tbv-config-smoke
-	/tmp/tbv-config-smoke
+	CC=gcc python3 /work/src/tools/ci/run-smoke.py
 }
 
 build_with_dkms() {

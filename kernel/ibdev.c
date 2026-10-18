@@ -37,13 +37,14 @@
 #include "../proto/native_data.h"
 #include "../proto/reliability.h"
 #include "tbv.h"
+#include "verbs_internal.h"
+#include "perf.h"
 
 #define TBV_IBDEV_ABI_VERSION 1
 #define TBV_IBDEV_PORTS 1
 #define TBV_IBDEV_MAX_QP 256
 #define TBV_IBDEV_MAX_QP_WR 1024
 #define TBV_IBDEV_MAX_CQ 256
-#define TBV_IBDEV_MAX_CQE 4096
 #define TBV_IBDEV_MAX_SGE 4
 #define TBV_IBDEV_MAX_READ_CTX 128
 #define TBV_IBDEV_QPN_MIN 0x900
@@ -250,19 +251,6 @@ struct tbv_pd {
 	struct tbv_state *owner;
 };
 
-struct tbv_cq {
-	struct ib_cq base;
-	struct tbv_state *owner;
-	spinlock_t lock;
-	struct ib_wc *entries;
-	u32 cqe;
-	u32 head;
-	u32 tail;
-	u32 count;
-	bool notify_armed;
-	bool overflowed;
-};
-
 struct tbv_recv_wqe {
 	u64 wr_id;
 	struct ib_cqe *wr_cqe;
@@ -422,6 +410,7 @@ struct tbv_qp {
 	 * their drained sends concurrently and report them out of order.
 	 */
 	struct mutex ack_lock;
+	struct mutex post_lock;
 	wait_queue_head_t credit_wait;
 	wait_queue_head_t apple_tx_wait;
 	wait_queue_head_t refs_wait;
@@ -443,6 +432,8 @@ struct tbv_qp {
 	u32 recv_head;
 	u32 recv_tail;
 	u32 recv_count;
+	/* Receive WQEs ever removed; identifies a peeked head for credits. */
+	u64 recv_popped;
 	u32 recv_credits_advertised;
 	u32 remote_recv_credits;
 	u32 early_remote_recv_credit_src_qp;
@@ -489,27 +480,6 @@ struct tbv_qp {
 	 * message and must not seed a new reassembly. Protected by rx_lock.
 	 */
 	bool apple_rx_discard;
-};
-
-struct tbv_mr {
-	struct ib_mr base;
-	struct tbv_state *owner;
-	struct ib_umem *umem;
-	/*
-	 * The umem's pages in order, so a copy finds the page of an offset
-	 * directly; scatterlist copy helpers walk from the first entry, which
-	 * costs one step per page before the offset. NULL when unindexed.
-	 */
-	struct page **pages;
-	unsigned long npages;
-	refcount_t refs;
-	struct work_struct free_work;
-	u64 start;
-	u64 length;
-	u64 virt_addr;
-	int access;
-	bool closing;
-	bool dma_mr;
 };
 
 struct tbv_ah {
@@ -646,9 +616,7 @@ struct tbv_gsi_send_ctx {
 };
 
 static DEFINE_IDA(tbv_qpn_ida);
-static atomic_t tbv_mr_key = ATOMIC_INIT(1);
 
-static int tbv_cq_push(struct tbv_cq *tcq, const struct ib_wc *wc);
 static void tbv_send_ctx_put(struct tbv_send_ctx *send);
 static bool tbv_send_complete(struct tbv_send_ctx *send, int status);
 static void tbv_send_tx_done(void *ctx, int status);
@@ -661,9 +629,6 @@ static void tbv_read_tx_done(void *ctx, int status);
 static void tbv_read_resp_ctx_get(struct tbv_read_resp_ctx *ctx);
 static void tbv_read_resp_ctx_put(struct tbv_read_resp_ctx *ctx);
 static int tbv_send_read_response_ctx(struct tbv_read_resp_ctx *ctx);
-static int tbv_umem_page_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
-				   struct page **page_out,
-				   u32 *page_off_out, u32 *len_out);
 static int tbv_rx_copy_to_wqe(struct tbv_state *state,
 			      const struct tbv_recv_wqe *wqe, u32 offset,
 			      const void *payload, u32 len, u32 *delivered);
@@ -714,6 +679,7 @@ static void tbv_release_send_segments(struct tbv_send_segment *segs,
 				      int nsegs);
 static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 					   enum tbv_send_post_reason reason);
+static int tbv_dmabuf_post_send(struct tbv_send_ctx *ctx);
 
 static u32 tbv_psn_next(u32 psn)
 {
@@ -837,134 +803,16 @@ static struct tbv_ibdev *tbv_to_ibdev(struct ib_device *ibdev)
 	return container_of(ibdev, struct tbv_ibdev, base);
 }
 
-static struct tbv_state *tbv_ibdev_state(struct ib_device *ibdev)
+struct tbv_state *tbv_ibdev_state(struct ib_device *ibdev)
 {
 	struct tbv_ibdev *dev = tbv_to_ibdev(ibdev);
 
 	return dev->state;
 }
 
-static enum tbv_backend_type tbv_ibdev_backend(struct ib_device *ibdev)
+enum tbv_backend_type tbv_ibdev_backend(struct ib_device *ibdev)
 {
 	return tbv_to_ibdev(ibdev)->backend;
-}
-
-static struct tbv_mr *tbv_mr_get(struct tbv_state *state, u32 key)
-{
-	struct tbv_mr *mr;
-	XA_STATE(xas, &state->verbs_mrs_xa, key);
-	unsigned long flags;
-
-	xas_lock_irqsave(&xas, flags);
-	mr = xas_load(&xas);
-	if (mr && !mr->closing && refcount_inc_not_zero(&mr->refs))
-		goto out;
-	mr = NULL;
-out:
-	xas_unlock_irqrestore(&xas, flags);
-	return mr;
-}
-
-static void tbv_mr_free(struct tbv_mr *mr)
-{
-	kvfree(mr->pages);
-	if (mr->umem)
-		ib_umem_release(mr->umem);
-	if (mr->owner)
-		atomic_dec(&mr->owner->verbs_mrs);
-	kfree(mr);
-}
-
-static void tbv_mr_free_work(struct work_struct *work)
-{
-	struct tbv_mr *mr = container_of(work, struct tbv_mr, free_work);
-
-	tbv_mr_free(mr);
-}
-
-static void tbv_mr_put(struct tbv_mr *mr)
-{
-	if (!mr)
-		return;
-
-	if (refcount_dec_and_test(&mr->refs))
-		queue_work(mr->owner && mr->owner->workqueue ?
-			   mr->owner->workqueue : system_unbound_wq,
-			   &mr->free_work);
-}
-
-/*
- * Lists the umem's pages in order. The index is optional: a scatterlist
- * that does not start page-aligned and consist of whole pages (other than
- * its last entry) leaves the MR unindexed, and copies walk the list.
- */
-static void tbv_mr_index_pages(struct tbv_mr *mr)
-{
-	struct sg_table *sgt = &mr->umem->sgt_append.sgt;
-	unsigned long npages = 0;
-	struct scatterlist *sg;
-	struct page **pages;
-	unsigned int i;
-
-	for_each_sgtable_sg(sgt, sg, i) {
-		if (sg->offset ||
-		    (!sg_is_last(sg) && !PAGE_ALIGNED(sg->length)))
-			return;
-		npages += DIV_ROUND_UP(sg->length, PAGE_SIZE);
-	}
-	if (!npages)
-		return;
-
-	pages = kvmalloc_array(npages, sizeof(*pages), GFP_KERNEL);
-	if (!pages)
-		return;
-	npages = 0;
-	for_each_sgtable_sg(sgt, sg, i) {
-		unsigned long n = DIV_ROUND_UP(sg->length, PAGE_SIZE);
-		unsigned long j;
-
-		for (j = 0; j < n; j++)
-			pages[npages++] =
-				pfn_to_page(page_to_pfn(sg_page(sg)) + j);
-	}
-	mr->pages = pages;
-	mr->npages = npages;
-}
-
-/*
- * Copies @len bytes between @buf and an indexed MR at @offset, counted from
- * the start of the umem's first page (ib_umem_offset() plus the offset from
- * the MR start). Returns -ENOENT for an unindexed MR.
- */
-static int tbv_mr_copy_pages(struct tbv_mr *mr, size_t offset, void *buf,
-			     size_t len, bool to_mr)
-{
-	if (!mr->pages)
-		return -ENOENT;
-
-	while (len) {
-		unsigned long idx = offset >> PAGE_SHIFT;
-		size_t in_page = offset_in_page(offset);
-		size_t chunk = min_t(size_t, len, PAGE_SIZE - in_page);
-		struct page *page;
-		u8 *va;
-
-		if (idx >= mr->npages)
-			return -EFAULT;
-		page = mr->pages[idx];
-		va = kmap_local_page(page);
-		if (to_mr) {
-			memcpy(va + in_page, buf, chunk);
-			flush_dcache_page(page);
-		} else {
-			memcpy(buf, va + in_page, chunk);
-		}
-		kunmap_local(va);
-		buf = (u8 *)buf + chunk;
-		offset += chunk;
-		len -= chunk;
-	}
-	return 0;
 }
 
 static struct tbv_qp *tbv_qp_get_by_num(struct tbv_state *state, u32 qpn)
@@ -1215,6 +1063,11 @@ static void tbv_qp_queue_error(struct tbv_qp *tqp)
 						   system_wq;
 	if (!queue_work(wq, &tqp->error_work))
 		tbv_qp_put(tqp);
+}
+
+void tbv_ibdev_cq_overflow(struct ib_qp *qp)
+{
+	tbv_qp_queue_error(container_of(qp, struct tbv_qp, base));
 }
 
 static bool tbv_qp_allows_post(struct tbv_qp *tqp)
@@ -1848,6 +1701,10 @@ static void tbv_cancel_send_ctx_packets(struct tbv_send_ctx *send)
 
 	if (!send || !send->tqp || !send->tqp->rail)
 		return;
+	if (tbv_dmabuf_verbs_enabled()) {
+		tbv_dmabuf_cancel(send);
+		return;
+	}
 
 	tqp = send->tqp;
 	if (!tqp->owner->native_fragment_striping ||
@@ -2642,35 +2499,6 @@ static int tbv_dealloc_pd(struct ib_pd *pd, struct ib_udata *udata)
 	return 0;
 }
 
-static int tbv_create_cq(struct ib_cq *cq, const struct ib_cq_init_attr *attr,
-			 struct uverbs_attr_bundle *attrs)
-{
-	struct tbv_cq *tcq = container_of(cq, struct tbv_cq, base);
-
-	if (!attr || attr->cqe <= 0 || attr->cqe > TBV_IBDEV_MAX_CQE)
-		return -EINVAL;
-
-	tcq->entries = kcalloc(attr->cqe, sizeof(*tcq->entries), GFP_KERNEL);
-	if (!tcq->entries)
-		return -ENOMEM;
-
-	spin_lock_init(&tcq->lock);
-	tcq->owner = tbv_ibdev_state(cq->device);
-	tcq->cqe = attr->cqe;
-	atomic_inc(&tcq->owner->verbs_cqs);
-	return 0;
-}
-
-static int tbv_destroy_cq(struct ib_cq *cq, struct ib_udata *udata)
-{
-	struct tbv_cq *tcq = container_of(cq, struct tbv_cq, base);
-
-	if (tcq->owner)
-		atomic_dec(&tcq->owner->verbs_cqs);
-	kfree(tcq->entries);
-	return 0;
-}
-
 static int tbv_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *init_attr,
 			 struct ib_udata *udata)
 {
@@ -2683,6 +2511,8 @@ static int tbv_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *init_attr,
 	int ret;
 
 	if (!init_attr || init_attr->srq)
+		return -EOPNOTSUPP;
+	if (tbv_dmabuf_verbs_enabled() && init_attr->qp_type != IB_QPT_RC)
 		return -EOPNOTSUPP;
 	gsi = init_attr->qp_type == IB_QPT_GSI;
 	if (init_attr->qp_type != IB_QPT_RC &&
@@ -2782,6 +2612,7 @@ static int tbv_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *init_attr,
 	spin_lock_init(&tqp->lock);
 	mutex_init(&tqp->rx_lock);
 	mutex_init(&tqp->ack_lock);
+	mutex_init(&tqp->post_lock);
 	init_waitqueue_head(&tqp->credit_wait);
 	init_waitqueue_head(&tqp->apple_tx_wait);
 	init_waitqueue_head(&tqp->refs_wait);
@@ -2847,6 +2678,7 @@ static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
 	spin_lock_irqsave(&tqp->lock, flags);
 	tqp->closing = true;
 	spin_unlock_irqrestore(&tqp->lock, flags);
+	tbv_dmabuf_cancel_recv(tqp);
 
 	if (tqp->type == IB_QPT_GSI && tqp->rail && tqp->rail->ibdev) {
 		mutex_lock(&tqp->owner->lock);
@@ -2864,6 +2696,8 @@ static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
 	spin_unlock_irqrestore(&tqp->lock, flags);
 
 	tbv_qp_flush_apple_sq(tqp);
+	if (tbv_dmabuf_verbs_enabled())
+		mutex_lock(&tqp->ack_lock);
 	tbv_qp_flush_sends(tqp, &flush);
 	while (!list_empty(&flush)) {
 		struct tbv_send_ctx *send =
@@ -2875,6 +2709,8 @@ static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
 		tbv_send_complete(send, status);
 		tbv_send_ctx_put(send);
 	}
+	if (tbv_dmabuf_verbs_enabled())
+		mutex_unlock(&tqp->ack_lock);
 
 	tbv_qp_flush_reads(tqp, &flush);
 	while (!list_empty(&flush)) {
@@ -3348,7 +3184,7 @@ static bool tbv_send_complete(struct tbv_send_ctx *send, int status)
 		send->apple_window_acquired = false;
 	}
 
-	if (send->signaled) {
+	if (send->signaled || status) {
 		struct tbv_cq *send_cq =
 			container_of(tqp->base.send_cq, struct tbv_cq, base);
 		struct ib_wc wc = {};
@@ -3360,6 +3196,8 @@ static bool tbv_send_complete(struct tbv_send_ctx *send, int status)
 			wc.status = IB_WC_RNR_RETRY_EXC_ERR;
 		else if (status == -ETIMEDOUT)
 			wc.status = IB_WC_RETRY_EXC_ERR;
+		else if (status == -EACCES || status == -EFAULT)
+			wc.status = IB_WC_REM_ACCESS_ERR;
 		else
 			wc.status = IB_WC_WR_FLUSH_ERR;
 		wc.opcode = send->wc_opcode;
@@ -4186,6 +4024,11 @@ static int tbv_prepare_send_segments(struct tbv_qp *tqp,
 			ret = -EINVAL;
 			goto err_release;
 		}
+		if (mr->base.pd != tqp->base.pd) {
+			tbv_mr_put(mr);
+			ret = -EACCES;
+			goto err_release;
+		}
 		if (mr->dma_mr) {
 			tbv_mr_put(mr);
 			ret = -EOPNOTSUPP;
@@ -4965,6 +4808,8 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 	bool zcopy_safe = false;
 	bool sent_any = false;
 	int ret = 0;
+	if (tbv_dmabuf_verbs_enabled())
+		return tbv_dmabuf_post_send(ctx);
 
 	for (list_idx = 0; list_idx < ARRAY_SIZE(frame_lists); list_idx++) {
 		INIT_LIST_HEAD(&frame_lists[list_idx]);
@@ -5620,6 +5465,8 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 	if (tbv_qp_uses_apple_transport(tqp))
 		return tbv_post_apple_send(tqp, wr);
 
+	if (wr->opcode == IB_WR_RDMA_READ && tbv_dmabuf_verbs_enabled())
+		return -EOPNOTSUPP;
 	if (wr->opcode == IB_WR_RDMA_READ)
 		return tbv_post_rdma_read(tqp, wr);
 
@@ -5647,6 +5494,21 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 		atomic64_inc(&tqp->owner->data_wr_copy_error);
 		goto err_put_qp;
 	}
+	if (tbv_dmabuf_verbs_enabled()) {
+		int i;
+
+		for (i = 0; i < nsegs; i++) {
+			if (!segs[i].mr->dmabuf)
+				continue;
+			/* One contiguous GPU output lease; host scatter/gather still
+			 * works via ordinary-MR staging in descriptor mode. */
+			if (nsegs != 1 || (segs[i].addr - segs[i].mr->start) % SZ_4K ||
+			    total_len % 32) {
+				ret = -EOPNOTSUPP;
+				goto err_release_segs;
+			}
+		}
+	}
 	if (is_write) {
 		const struct ib_rdma_wr *rwr = rdma_wr(wr);
 		u64 remote_end;
@@ -5659,7 +5521,7 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 	}
 
 	recv_credit_required = is_send || write_with_imm;
-	if (recv_credit_required) {
+	if (recv_credit_required && !tbv_dmabuf_verbs_enabled()) {
 		ret = tbv_qp_consume_remote_recv_credit(tqp);
 		if (!ret) {
 			credit_consumed = true;
@@ -5763,23 +5625,47 @@ err_put_qp:
 	return ret;
 }
 
-static int tbv_post_send(struct ib_qp *qp, const struct ib_send_wr *wr,
+static int tbv_post_send_impl(struct ib_qp *qp, const struct ib_send_wr *wr,
 			 const struct ib_send_wr **bad_wr)
 {
 	struct tbv_qp *tqp = container_of(qp, struct tbv_qp, base);
 	const struct ib_send_wr *cur;
 	int ret;
+	if (tbv_dmabuf_verbs_enabled())
+		mutex_lock(&tqp->post_lock);
 
 	for (cur = wr; cur; cur = cur->next) {
 		ret = tbv_post_send_one(tqp, cur);
 		if (ret) {
 			if (bad_wr)
 				*bad_wr = cur;
+			if (tbv_dmabuf_verbs_enabled())
+				mutex_unlock(&tqp->post_lock);
 			return ret;
 		}
 	}
 
+	if (tbv_dmabuf_verbs_enabled())
+		mutex_unlock(&tqp->post_lock);
 	return 0;
+}
+
+static int tbv_post_send(struct ib_qp *qp, const struct ib_send_wr *wr,
+			 const struct ib_send_wr **bad_wr)
+{
+	u64 start = tbv_perf_clock();
+	struct tbv_perf_id perf = { .src_qp = qp->qp_num, .tx = true };
+	int ret;
+
+	if (start && wr) {
+		perf.wr_id = wr->wr_id;
+		perf.opcode = wr->opcode;
+		if (wr->num_sge == 1 && wr->sg_list)
+			perf.bytes = wr->sg_list->length;
+	}
+	ret = tbv_post_send_impl(qp, wr, bad_wr);
+	tbv_perf_span(&perf, "verbs_post_send", start, ret, 0);
+	return ret;
 }
 
 static int tbv_validate_recv_sge(struct tbv_qp *tqp, const struct ib_sge *sge)
@@ -5799,6 +5685,10 @@ static int tbv_validate_recv_sge(struct tbv_qp *tqp, const struct ib_sge *sge)
 	mr = tbv_mr_get(tqp->owner, sge->lkey);
 	if (!mr)
 		return -EINVAL;
+	if (mr->base.pd != tqp->base.pd) {
+		ret = -EACCES;
+		goto err_put;
+	}
 	if (!(mr->access & IB_ACCESS_LOCAL_WRITE)) {
 		ret = -EACCES;
 		goto err_put;
@@ -5820,7 +5710,7 @@ err_put:
 	return ret;
 }
 
-static int tbv_post_recv(struct ib_qp *qp, const struct ib_recv_wr *wr,
+static int tbv_post_recv_impl(struct ib_qp *qp, const struct ib_recv_wr *wr,
 			 const struct ib_recv_wr **bad_wr)
 {
 	struct tbv_qp *tqp = container_of(qp, struct tbv_qp, base);
@@ -5879,6 +5769,8 @@ static int tbv_post_recv(struct ib_qp *qp, const struct ib_recv_wr *wr,
 
 	if (posted)
 		tbv_qp_advertise_recv_credits(tqp);
+	if (posted)
+		tbv_dmabuf_recv_posted(tqp);
 	if (posted) {
 		mutex_lock(&tqp->rx_lock);
 		if (tbv_qp_uses_apple_transport(tqp))
@@ -5893,6 +5785,23 @@ err_bad:
 		tbv_qp_advertise_recv_credits(tqp);
 	if (bad_wr)
 		*bad_wr = cur;
+	return ret;
+}
+
+static int tbv_post_recv(struct ib_qp *qp, const struct ib_recv_wr *wr,
+			 const struct ib_recv_wr **bad_wr)
+{
+	u64 start = tbv_perf_clock();
+	struct tbv_perf_id perf = { .src_qp = qp->qp_num };
+	int ret;
+
+	if (start && wr) {
+		perf.wr_id = wr->wr_id;
+		if (wr->num_sge == 1 && wr->sg_list)
+			perf.bytes = wr->sg_list->length;
+	}
+	ret = tbv_post_recv_impl(qp, wr, bad_wr);
+	tbv_perf_span(&perf, "verbs_post_recv", start, ret, 0);
 	return ret;
 }
 
@@ -5911,50 +5820,12 @@ static bool tbv_qp_pop_recv(struct tbv_qp *tqp, struct tbv_recv_wqe *wqe)
 	       sizeof(tqp->recvq[tqp->recv_head]));
 	tqp->recv_head = (tqp->recv_head + 1) % tqp->recvq_size;
 	tqp->recv_count--;
+	tqp->recv_popped++;
 	if (tqp->recv_credits_advertised)
 		tqp->recv_credits_advertised--;
 	atomic_dec(&tqp->owner->verbs_recv_wqes);
 	spin_unlock_irqrestore(&tqp->lock, flags);
 	return true;
-}
-
-static int tbv_cq_push(struct tbv_cq *tcq, const struct ib_wc *wc)
-{
-	struct tbv_qp *overflow_qp = NULL;
-	unsigned long flags;
-	bool notify = false;
-	int ret = 0;
-
-	spin_lock_irqsave(&tcq->lock, flags);
-	if (tcq->overflowed || tcq->count == tcq->cqe) {
-		tcq->overflowed = true;
-		if (tcq->owner)
-			atomic64_inc(&tcq->owner->data_cq_overflow);
-		if (tcq->notify_armed) {
-			tcq->notify_armed = false;
-			notify = true;
-		}
-		if (wc && wc->qp)
-			overflow_qp = container_of(wc->qp, struct tbv_qp,
-						   base);
-		ret = -ENOSPC;
-		goto out;
-	}
-
-	tcq->entries[tcq->tail] = *wc;
-	tcq->tail = (tcq->tail + 1) % tcq->cqe;
-	tcq->count++;
-	if (tcq->notify_armed) {
-		tcq->notify_armed = false;
-		notify = true;
-	}
-out:
-	spin_unlock_irqrestore(&tcq->lock, flags);
-	if (overflow_qp)
-		tbv_qp_queue_error(overflow_qp);
-	if (notify && tcq->base.comp_handler)
-		tcq->base.comp_handler(&tcq->base, tcq->base.cq_context);
-	return ret;
 }
 
 static void tbv_apple_pending_reset(struct tbv_apple_pending_rx *p)
@@ -6578,6 +6449,8 @@ static void tbv_qp_advertise_recv_credits(struct tbv_qp *tqp)
 	u32 credits;
 	u32 dest_qp;
 	int ret;
+	if (tbv_dmabuf_verbs_enabled())
+		return; /* PREPARE observes the receive queue directly. */
 
 	if (tbv_qp_uses_apple_transport(tqp))
 		return;
@@ -7040,165 +6913,6 @@ static void tbv_qp_flush_apple_sq(struct tbv_qp *tqp)
 		}
 		tbv_apple_sq_free_entry(entry);
 	}
-}
-
-static int tbv_umem_copy_to(struct tbv_mr *mr, u64 addr, const void *src,
-			    size_t len)
-{
-	struct sg_table *sgt = &mr->umem->sgt_append.sgt;
-	size_t offset;
-	size_t copied;
-	u64 mr_end;
-	u64 end;
-	int ret;
-
-	if (!len)
-		return 0;
-	if (mr->dma_mr)
-		return -EOPNOTSUPP;
-	if (check_add_overflow(addr, (u64)len, &end))
-		return -EINVAL;
-	if (check_add_overflow(mr->start, mr->length, &mr_end))
-		return -EINVAL;
-	if (addr < mr->start || end > mr_end)
-		return -EFAULT;
-
-	offset = ib_umem_offset(mr->umem) + addr - mr->start;
-	ret = tbv_mr_copy_pages(mr, offset, (void *)src, len, true);
-	if (ret != -ENOENT)
-		return ret;
-	copied = sg_pcopy_from_buffer(sgt->sgl, sgt->orig_nents, src, len,
-				      offset);
-	return copied == len ? 0 : -EFAULT;
-}
-
-static int tbv_umem_copy_to_iova(struct tbv_mr *mr, u64 iova,
-				 const void *src, size_t len)
-{
-	u64 iova_end;
-	u64 mr_iova_end;
-	u64 addr;
-
-	if (!len)
-		return 0;
-	if (mr->dma_mr)
-		return -EOPNOTSUPP;
-	if (check_add_overflow(iova, (u64)len, &iova_end))
-		return -EINVAL;
-	if (check_add_overflow(mr->virt_addr, mr->length, &mr_iova_end))
-		return -EINVAL;
-	if (iova < mr->virt_addr || iova_end > mr_iova_end)
-		return -EFAULT;
-	if (check_add_overflow(mr->start, iova - mr->virt_addr, &addr))
-		return -EINVAL;
-
-	return tbv_umem_copy_to(mr, addr, src, len);
-}
-
-static int tbv_umem_iova_to_addr(struct tbv_mr *mr, u64 iova, size_t len,
-				 u64 *addr_out)
-{
-	u64 iova_end;
-	u64 mr_iova_end;
-	u64 addr;
-
-	if (mr->dma_mr)
-		return -EOPNOTSUPP;
-	if (check_add_overflow(iova, (u64)len, &iova_end))
-		return -EINVAL;
-	if (check_add_overflow(mr->virt_addr, mr->length, &mr_iova_end))
-		return -EINVAL;
-	if (iova < mr->virt_addr || iova_end > mr_iova_end)
-		return -EFAULT;
-	if (check_add_overflow(mr->start, iova - mr->virt_addr, &addr))
-		return -EINVAL;
-
-	*addr_out = addr;
-	return 0;
-}
-
-static int tbv_umem_copy_from_iova(struct tbv_mr *mr, u64 iova,
-				   void *dst, size_t len)
-{
-	u64 addr;
-	int ret;
-
-	if (!len)
-		return 0;
-	ret = tbv_umem_iova_to_addr(mr, iova, len, &addr);
-	if (ret)
-		return ret;
-
-	ret = tbv_mr_copy_pages(mr, ib_umem_offset(mr->umem) + addr - mr->start,
-				dst, len, false);
-	if (ret != -ENOENT)
-		return ret;
-	return ib_umem_copy_from(dst, mr->umem, addr - mr->start, len);
-}
-
-static int tbv_umem_page_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
-				   struct page **page_out,
-				   u32 *page_off_out, u32 *len_out)
-{
-	struct sg_table *sgt = &mr->umem->sgt_append.sgt;
-	struct scatterlist *sg;
-	size_t offset;
-	u64 end;
-	u64 mr_end;
-	unsigned int i;
-
-	if (!max_len)
-		return -EINVAL;
-	if (mr->dma_mr)
-		return -EOPNOTSUPP;
-	if (check_add_overflow(addr, (u64)max_len, &end))
-		return -EINVAL;
-	if (check_add_overflow(mr->start, mr->length, &mr_end))
-		return -EINVAL;
-	if (addr < mr->start || end > mr_end)
-		return -EFAULT;
-
-	offset = ib_umem_offset(mr->umem) + addr - mr->start;
-	if (mr->pages) {
-		unsigned long idx = offset >> PAGE_SHIFT;
-		size_t page_off = offset_in_page(offset);
-		size_t chunk = min_t(size_t, PAGE_SIZE - page_off, max_len);
-
-		chunk = min_t(size_t, chunk, TBV_NATIVE_DATA_FRAME_SIZE);
-		if (idx >= mr->npages || !chunk)
-			return -EFAULT;
-		*page_out = mr->pages[idx];
-		*page_off_out = page_off;
-		*len_out = chunk;
-		return 0;
-	}
-	for_each_sgtable_sg(sgt, sg, i) {
-		size_t seg_len = sg->length;
-		size_t seg_off;
-		size_t page_off;
-		size_t chunk;
-
-		if (offset >= seg_len) {
-			offset -= seg_len;
-			continue;
-		}
-
-		seg_off = sg->offset + offset;
-		page_off = offset_in_page(seg_off);
-		chunk = min_t(size_t, PAGE_SIZE - page_off, seg_len - offset);
-		chunk = min_t(size_t, chunk, max_len);
-		chunk = min_t(size_t, chunk, TBV_NATIVE_DATA_FRAME_SIZE);
-		if (!chunk)
-			return -EFAULT;
-
-		*page_out = pfn_to_page(page_to_pfn(sg_page(sg)) +
-					(seg_off >> PAGE_SHIFT));
-		*page_off_out = page_off;
-		*len_out = chunk;
-		return 0;
-	}
-
-	return -EFAULT;
 }
 
 static int tbv_copy_to_read_segments(struct tbv_read_ctx *read, u32 offset,
@@ -7678,6 +7392,7 @@ static void tbv_qp_flush_recv_wqes(struct tbv_qp *tqp)
 		       sizeof(tqp->recvq[tqp->recv_head]));
 		tqp->recv_head = (tqp->recv_head + 1) % tqp->recvq_size;
 		tqp->recv_count--;
+		tqp->recv_popped++;
 		if (tqp->recv_credits_advertised)
 			tqp->recv_credits_advertised--;
 		if (tqp->owner)
@@ -7697,10 +7412,13 @@ static void tbv_qp_flush_error(struct tbv_qp *tqp)
 {
 	LIST_HEAD(flush);
 
+	tbv_dmabuf_cancel_recv(tqp);
 	wake_up_all(&tqp->credit_wait);
 	wake_up_all(&tqp->apple_tx_wait);
 	tbv_qp_flush_apple_sq(tqp);
 
+	if (tbv_dmabuf_verbs_enabled())
+		mutex_lock(&tqp->ack_lock);
 	tbv_qp_flush_sends(tqp, &flush);
 	while (!list_empty(&flush)) {
 		struct tbv_send_ctx *send =
@@ -7712,6 +7430,8 @@ static void tbv_qp_flush_error(struct tbv_qp *tqp)
 		tbv_send_complete(send, status);
 		tbv_send_ctx_put(send);
 	}
+	if (tbv_dmabuf_verbs_enabled())
+		mutex_unlock(&tqp->ack_lock);
 
 	tbv_qp_flush_reads(tqp, &flush);
 	while (!list_empty(&flush)) {
@@ -9499,47 +9219,6 @@ complete_ack:
 	tbv_read_ctx_put(read);
 }
 
-static int tbv_poll_cq(struct ib_cq *cq, int num_entries, struct ib_wc *wc)
-{
-	struct tbv_cq *tcq = container_of(cq, struct tbv_cq, base);
-	unsigned long flags;
-	int polled = 0;
-	bool overflowed;
-
-	if (num_entries <= 0 || !wc)
-		return 0;
-
-	spin_lock_irqsave(&tcq->lock, flags);
-	while (polled < num_entries && tcq->count) {
-		wc[polled++] = tcq->entries[tcq->head];
-		tcq->head = (tcq->head + 1) % tcq->cqe;
-		tcq->count--;
-	}
-	overflowed = tcq->overflowed;
-	spin_unlock_irqrestore(&tcq->lock, flags);
-
-	if (!polled && overflowed)
-		return -EIO;
-	return polled;
-}
-
-static int tbv_req_notify_cq(struct ib_cq *cq, enum ib_cq_notify_flags flags)
-{
-	struct tbv_cq *tcq = container_of(cq, struct tbv_cq, base);
-	unsigned long irq_flags;
-	int ret;
-
-	spin_lock_irqsave(&tcq->lock, irq_flags);
-	if (tcq->overflowed) {
-		ret = -EIO;
-	} else {
-		tcq->notify_armed = true;
-		ret = tcq->count ? 1 : 0;
-	}
-	spin_unlock_irqrestore(&tcq->lock, irq_flags);
-	return ret;
-}
-
 static void tbv_rx_handle_mad(struct tbv_state *state, struct tbv_path *rx_path,
 			      const struct tbv_native_data_header *hdr,
 			      const void *payload)
@@ -9849,120 +9528,407 @@ void tbv_ibdev_rx_frame(struct tbv_state *state, struct tbv_path *rx_path,
 	tbv_ibdev_rx_native_frame(state, rx_path, &hdr, payload);
 }
 
-static int tbv_mr_publish(struct tbv_mr *mr, struct ib_pd *pd)
-{
-	struct tbv_state *owner = tbv_ibdev_state(pd->device);
-	unsigned long flags;
-	u32 key;
-	int ret;
-
-	key = atomic_inc_return(&tbv_mr_key);
-	mr->base.device = pd->device;
-	mr->base.pd = pd;
-	mr->base.lkey = key;
-	mr->base.rkey = key;
-	mr->owner = owner;
-	refcount_set(&mr->refs, 1);
-	INIT_WORK(&mr->free_work, tbv_mr_free_work);
-
-	xa_lock_irqsave(&owner->verbs_mrs_xa, flags);
-	ret = __xa_insert(&owner->verbs_mrs_xa, key, mr, GFP_KERNEL);
-	xa_unlock_irqrestore(&owner->verbs_mrs_xa, flags);
-	if (ret)
-		return ret;
-
-	atomic_inc(&owner->verbs_mrs);
-	return 0;
-}
-
-static struct ib_mr *tbv_get_dma_mr(struct ib_pd *pd, int access)
-{
+struct tbv_dmabuf_recv_ctx {
+	struct tbv_qp *tqp;
 	struct tbv_mr *mr;
-	int ret;
+	struct tbv_recv_wqe wqe;
+	struct tbv_native_data_header hdr;
+	u64 address;
+	/* A pre-armed credit inspects the head WQE without consuming it. */
+	u64 recv_popped;
+	bool has_recv;
+	bool peeked;
+};
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
-	if (!mr)
-		return ERR_PTR(-ENOMEM);
+static bool tbv_dmabuf_send_alive(void *context)
+{
+	struct tbv_send_ctx *send = context;
 
-	mr->base.type = IB_MR_TYPE_DMA;
-	mr->base.iova = 0;
-	mr->base.length = U64_MAX;
-	mr->start = 0;
-	mr->length = U64_MAX;
-	mr->virt_addr = 0;
-	mr->access = access;
-	mr->dma_mr = true;
-
-	ret = tbv_mr_publish(mr, pd);
-	if (ret) {
-		kfree(mr);
-		return ERR_PTR(ret);
-	}
-
-	return &mr->base;
+	return tbv_qp_allows_post(send->tqp) && !tbv_send_is_completed(send);
 }
 
-static struct ib_mr *tbv_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
-				     u64 virt_addr, int access,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
-				     struct ib_dmah *dmah,
-#endif
-				     struct ib_udata *udata)
+static int tbv_dmabuf_send_copy(void *context, u32 offset, void *data,
+				u32 bytes, bool to_mr)
 {
-	struct tbv_mr *mr;
-	int ret;
+	struct tbv_send_ctx *send = context;
+	u32 copied = 0;
+	int i;
 
-	if (!length)
-		return ERR_PTR(-EINVAL);
+	if (to_mr || offset > send->total_len || bytes > send->total_len - offset)
+		return -EINVAL;
+	for (i = 0; i < send->nsegs && copied < bytes; i++) {
+		struct tbv_send_segment *seg = &send->segs[i];
+		u32 chunk;
+		int ret;
 
-	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
-	if (!mr)
-		return ERR_PTR(-ENOMEM);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
-	mr->umem = ib_umem_get_va(pd->device, start, length, access);
-#else
-	mr->umem = ib_umem_get(pd->device, start, length, access);
-#endif
-	if (IS_ERR(mr->umem)) {
-		struct ib_umem *umem = mr->umem;
-
-		kfree(mr);
-		return ERR_CAST(umem);
+		if (offset >= seg->length) {
+			offset -= seg->length;
+			continue;
+		}
+		chunk = min_t(u32, seg->length - offset, bytes - copied);
+		ret = tbv_umem_copy_from_iova(seg->mr,
+			seg->mr->virt_addr + seg->addr - seg->mr->start + offset,
+			data + copied, chunk);
+		if (ret)
+			return ret;
+		copied += chunk;
+		offset = 0;
 	}
-
-	mr->base.type = IB_MR_TYPE_USER;
-	mr->base.iova = virt_addr;
-	mr->base.length = length;
-	mr->start = start;
-	mr->length = length;
-	mr->virt_addr = virt_addr;
-	mr->access = access;
-	tbv_mr_index_pages(mr);
-	ret = tbv_mr_publish(mr, pd);
-	if (ret) {
-		kvfree(mr->pages);
-		ib_umem_release(mr->umem);
-		kfree(mr);
-		return ERR_PTR(ret);
-	}
-	return &mr->base;
+	return copied == bytes ? 0 : -EFAULT;
 }
 
-static int tbv_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata)
+static int tbv_dmabuf_send_finish(void *context, int status)
 {
-	struct tbv_mr *mr = container_of(ibmr, struct tbv_mr, base);
+	struct tbv_send_ctx *send = context;
+	struct tbv_qp *tqp = send->tqp;
+	LIST_HEAD(complete);
+
+	/* The worker's reference survives the ordered completion drain. Local
+	 * descriptors and remote placement are both complete before success. */
+	mutex_lock(&tqp->ack_lock);
+	tbv_qp_complete_send_ordered(tqp, send->psn, status, &complete, NULL);
+	while (!list_empty(&complete)) {
+		struct tbv_send_ctx *pos = list_first_entry(&complete,
+							 struct tbv_send_ctx, node);
+
+		list_del_init(&pos->node);
+		tbv_send_complete(pos, pos->completion_status);
+		tbv_send_ctx_put(pos);
+	}
+	mutex_unlock(&tqp->ack_lock);
+	if (status)
+		tbv_qp_queue_error(tqp);
+	else
+		atomic64_inc(&tqp->owner->data_rx_ack);
+	/* Drops exactly the reference and tx_pending reserved at submission.
+	 * No timeout is armed for a send already removed from pending_sends. */
+	tbv_send_tx_done(send, 0);
+	return status;
+}
+
+static int tbv_dmabuf_post_send(struct tbv_send_ctx *ctx)
+{
+	struct tbv_dmabuf_buffer buffer = {
+		.context = ctx,
+		.wr_id = ctx->wr_id,
+		.copy = tbv_dmabuf_send_copy,
+		.alive = tbv_dmabuf_send_alive,
+		.finish = tbv_dmabuf_send_finish,
+	};
+	struct tbv_native_data_header hdr = {
+		.opcode = ctx->opcode,
+		.flags = ctx->solicited ? TBV_NATIVE_DATA_F_SOLICITED : 0,
+		.dest_qp = ctx->tqp->attr.dest_qp_num,
+		.src_qp = ctx->tqp->base.qp_num,
+		.psn = ctx->psn,
+		.length = ctx->total_len,
+		.imm_data = ctx->imm_data,
+		.remote_addr = ctx->remote_addr,
+		.rkey = ctx->rkey,
+	};
 	unsigned long flags;
+	unsigned long timeout;
+	int ret;
 
-	if (mr->owner) {
-		xa_lock_irqsave(&mr->owner->verbs_mrs_xa, flags);
-		mr->closing = true;
-		__xa_erase(&mr->owner->verbs_mrs_xa, ibmr->lkey);
-		xa_unlock_irqrestore(&mr->owner->verbs_mrs_xa, flags);
+	if (ctx->nsegs == 1 && ctx->segs[0].mr->dmabuf) {
+		buffer.mr = ctx->segs[0].mr->dmabuf;
+		buffer.offset = ctx->segs[0].addr - ctx->segs[0].mr->start;
+		atomic64_inc(&ctx->tqp->owner->data_wr_zcopy);
+	} else {
+		atomic64_inc(&ctx->tqp->owner->data_wr_copied);
 	}
+	spin_lock_irqsave(&ctx->tqp->lock, flags);
+	timeout = tbv_qp_tx_timeout_jiffies_locked(ctx->tqp);
+	spin_unlock_irqrestore(&ctx->tqp->lock, flags);
+	tbv_send_ctx_get(ctx);
+	atomic_inc(&ctx->tx_pending);
+	ret = tbv_dmabuf_submit(ctx->tqp->owner, ctx->tqp->rail, &hdr, &buffer,
+				ctx->max_retries, ctx->max_rnr_retries, timeout);
+	if (ret) {
+		atomic_dec(&ctx->tx_pending);
+		tbv_send_ctx_put(ctx);
+	}
+	return ret;
+}
 
-	tbv_mr_put(mr);
+static bool tbv_dmabuf_recv_alive(void *context)
+{
+	struct tbv_dmabuf_recv_ctx *ctx = context;
+
+	return tbv_qp_allows_post(ctx->tqp);
+}
+
+static int tbv_dmabuf_recv_copy(void *context, u32 offset, void *data,
+				u32 bytes, bool to_mr)
+{
+	struct tbv_dmabuf_recv_ctx *ctx = context;
+
+	if (!to_mr || offset > ctx->hdr.length || bytes > ctx->hdr.length - offset)
+		return -EINVAL;
+	return tbv_umem_copy_to_iova(ctx->mr, ctx->address + offset, data, bytes);
+}
+
+static int tbv_dmabuf_recv_finish(void *context, int status)
+{
+	struct tbv_dmabuf_recv_ctx *ctx = context;
+	struct tbv_qp *tqp = ctx->tqp;
+	bool is_write = ctx->hdr.opcode == TBV_NATIVE_DATA_OP_RDMA_WRITE ||
+			ctx->hdr.opcode == TBV_NATIVE_DATA_OP_RDMA_WRITE_IMM;
+	bool imm = ctx->hdr.opcode == TBV_NATIVE_DATA_OP_SEND_IMM ||
+		   ctx->hdr.opcode == TBV_NATIVE_DATA_OP_RDMA_WRITE_IMM;
+
+	if (ctx->peeked && !ctx->has_recv) {
+		/* An unclaimed credit consumed no WQE and no PSN. */
+		tbv_mr_put(ctx->mr);
+		tbv_qp_put(tqp);
+		kfree(ctx);
+		return status;
+	}
+	mutex_lock(&tqp->rx_lock);
+	if (ctx->has_recv) {
+		struct tbv_cq *cq = container_of(tqp->base.recv_cq, struct tbv_cq, base);
+		struct ib_wc wc = {};
+
+		tbv_wc_set_recv_wr(&wc, &ctx->wqe);
+		wc.status = status == -ECANCELED ? IB_WC_WR_FLUSH_ERR :
+			    status ? IB_WC_LOC_PROT_ERR : IB_WC_SUCCESS;
+		wc.opcode = is_write && !status ? IB_WC_RECV_RDMA_WITH_IMM : IB_WC_RECV;
+		wc.qp = &tqp->base;
+		wc.src_qp = ctx->hdr.src_qp;
+		wc.byte_len = status ? 0 : ctx->hdr.length;
+		wc.port_num = 1;
+		if (imm && !status) {
+			wc.wc_flags = IB_WC_WITH_IMM;
+			wc.ex.imm_data = cpu_to_be32(ctx->hdr.imm_data);
+		}
+		if (tbv_cq_push(cq, &wc))
+			status = -ENOSPC;
+	}
+	tqp->rx_expected_psn = tbv_psn_next(ctx->hdr.psn);
+	tbv_qp_ack_history_store_locked(tqp, ctx->hdr.psn,
+		status ? TBV_NATIVE_SEND_ACK_ERROR : TBV_NATIVE_SEND_ACK_OK);
+	mutex_unlock(&tqp->rx_lock);
+	if (status)
+		tbv_qp_queue_error(tqp);
+	tbv_mr_put(ctx->mr);
+	tbv_qp_put(tqp);
+	kfree(ctx);
+	return status;
+}
+
+int tbv_ibdev_dmabuf_begin(struct tbv_state *state, struct tbv_rail *rail,
+			    const struct tbv_native_data_header *hdr,
+			    struct tbv_dmabuf_buffer *buffer)
+{
+	struct tbv_dmabuf_recv_ctx *ctx;
+	struct tbv_qp *tqp;
+	bool is_write = hdr->opcode == TBV_NATIVE_DATA_OP_RDMA_WRITE ||
+			hdr->opcode == TBV_NATIVE_DATA_OP_RDMA_WRITE_IMM;
+	bool needs_recv = !is_write || hdr->opcode == TBV_NATIVE_DATA_OP_RDMA_WRITE_IMM;
+	u64 end, mr_end;
+	int old_status;
+	int ret = -EACCES;
+
+	tqp = tbv_qp_get_by_num(state, hdr->dest_qp);
+	if (!tqp)
+		return -ENOENT;
+	if (tqp->type != IB_QPT_RC || !tbv_qp_allows_post(tqp) ||
+	    tbv_qp_validate_native_endpoint(tqp, hdr) != TBV_RX_ENDPOINT_OK ||
+	    memcmp(tqp->rail->peer->remote_host_id, rail->peer->remote_host_id, 16)) {
+		tbv_qp_put(tqp);
+		return -EACCES;
+	}
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx) {
+		tbv_qp_put(tqp);
+		return -ENOMEM;
+	}
+	ctx->tqp = tqp;
+	ctx->hdr = *hdr;
+	mutex_lock(&tqp->rx_lock);
+	if (hdr->psn != tqp->rx_expected_psn) {
+		ret = tbv_qp_ack_history_lookup_locked(tqp, hdr->psn, &old_status) ?
+			(old_status == TBV_NATIVE_SEND_ACK_OK ? TBV_DMABUF_DONE : -EIO) :
+			TBV_DMABUF_BUSY;
+		goto fail;
+	}
+	if (is_write) {
+		ctx->mr = tbv_mr_get(state, hdr->rkey);
+		ctx->address = hdr->remote_addr;
+		if (!(READ_ONCE(tqp->attr.qp_access_flags) & IB_ACCESS_REMOTE_WRITE) ||
+		    !ctx->mr || ctx->mr->base.pd != tqp->base.pd ||
+		    !(ctx->mr->access & IB_ACCESS_REMOTE_WRITE))
+			goto fail;
+	}
+	if (needs_recv) {
+		if (!tbv_qp_pop_recv(tqp, &ctx->wqe)) {
+			ret = TBV_DMABUF_RNR;
+			goto fail;
+		}
+		ctx->has_recv = true;
+		if (!is_write && hdr->length) {
+			ctx->mr = tbv_mr_get(state, ctx->wqe.lkey);
+			if (!ctx->mr || ctx->mr->base.pd != tqp->base.pd ||
+			    !(ctx->mr->access & IB_ACCESS_LOCAL_WRITE) ||
+			    hdr->length > ctx->wqe.length)
+				goto fail;
+			ctx->address = ctx->mr->virt_addr + ctx->wqe.addr - ctx->mr->start;
+		}
+	}
+	if ((is_write || hdr->length) && (!ctx->mr || ctx->mr->dma_mr ||
+	    check_add_overflow(ctx->address, (u64)hdr->length, &end) ||
+	    check_add_overflow(ctx->mr->virt_addr, ctx->mr->length, &mr_end) ||
+	    ctx->address < ctx->mr->virt_addr || end > mr_end ||
+	    (ctx->mr->dmabuf && (ctx->address - ctx->mr->virt_addr) % SZ_4K)))
+		goto fail;
+	/* Sub-32-byte raw tails overwrote GPU guard bytes on the test NHIs.
+	 * Reject them before arming DMA; host staging copies only logical bytes.
+	 * RX frame buffers are always 4 KiB in NHI hardware. Even a short
+	 * logical tail needs a complete registered page, and SEND must reserve
+	 * that page in its receive WQE. TX still sends only the logical bytes. */
+	if (ctx->mr && ctx->mr->dmabuf &&
+	    (hdr->length % 32 || ALIGN(hdr->length, SZ_4K) > mr_end - ctx->address ||
+	     (!is_write && ALIGN(hdr->length, SZ_4K) > ctx->wqe.length)))
+		goto fail;
+	*buffer = (struct tbv_dmabuf_buffer) {
+		.mr = ctx->mr ? ctx->mr->dmabuf : NULL,
+		.offset = ctx->mr ? ctx->address - ctx->mr->virt_addr : 0,
+		.owner = tqp,
+		.context = ctx,
+		.copy = tbv_dmabuf_recv_copy,
+		.alive = tbv_dmabuf_recv_alive,
+		.finish = tbv_dmabuf_recv_finish,
+	};
+	mutex_unlock(&tqp->rx_lock);
 	return 0;
+fail:
+	mutex_unlock(&tqp->rx_lock);
+	if (ctx->has_recv) {
+		tbv_dmabuf_recv_finish(ctx, ret);
+	} else {
+		tbv_mr_put(ctx->mr);
+		tbv_qp_put(tqp);
+		kfree(ctx);
+	}
+	return ret;
+}
+
+/*
+ * Pre-arm the head receive WQE of a GPU SEND stream. Validates exactly as
+ * tbv_ibdev_dmabuf_begin() for a SEND of hdr->length at the QP's expected
+ * PSN, which it returns in hdr->psn, but leaves the WQE posted. Returns
+ * -EAGAIN with buffer->owner set (no reference) when the RQ is empty.
+ */
+int tbv_ibdev_dmabuf_peek(struct tbv_state *state, struct tbv_rail *rail,
+			  struct tbv_native_data_header *hdr,
+			  struct tbv_dmabuf_buffer *buffer)
+{
+	struct tbv_dmabuf_recv_ctx *ctx;
+	struct tbv_qp *tqp;
+	unsigned long flags;
+	u64 end, mr_end;
+	int ret = -EACCES;
+
+	if ((hdr->opcode != TBV_NATIVE_DATA_OP_SEND &&
+	     hdr->opcode != TBV_NATIVE_DATA_OP_SEND_IMM) || !hdr->length)
+		return -EINVAL;
+	tqp = tbv_qp_get_by_num(state, hdr->dest_qp);
+	if (!tqp)
+		return -ENOENT;
+	mutex_lock(&tqp->rx_lock);
+	hdr->psn = tqp->rx_expected_psn;
+	if (tqp->type != IB_QPT_RC || !tbv_qp_allows_post(tqp) ||
+	    tbv_qp_validate_native_endpoint(tqp, hdr) != TBV_RX_ENDPOINT_OK ||
+	    memcmp(tqp->rail->peer->remote_host_id, rail->peer->remote_host_id, 16))
+		goto put;
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx) {
+		ret = -ENOMEM;
+		goto put;
+	}
+	spin_lock_irqsave(&tqp->lock, flags);
+	if (!tqp->recv_count || tqp->closing) {
+		spin_unlock_irqrestore(&tqp->lock, flags);
+		kfree(ctx);
+		buffer->owner = tqp;
+		ret = -EAGAIN;
+		goto put;
+	}
+	ctx->wqe = tqp->recvq[tqp->recv_head];
+	ctx->recv_popped = tqp->recv_popped;
+	spin_unlock_irqrestore(&tqp->lock, flags);
+	ctx->tqp = tqp;
+	ctx->hdr = *hdr;
+	ctx->peeked = true;
+	ctx->mr = tbv_mr_get(state, ctx->wqe.lkey);
+	if (!ctx->mr || !ctx->mr->dmabuf || ctx->mr->base.pd != tqp->base.pd ||
+	    !(ctx->mr->access & IB_ACCESS_LOCAL_WRITE) ||
+	    hdr->length % 32 || ALIGN(hdr->length, SZ_4K) > ctx->wqe.length)
+		goto fail;
+	ctx->address = ctx->mr->virt_addr + ctx->wqe.addr - ctx->mr->start;
+	if (check_add_overflow(ctx->address, (u64)ALIGN(hdr->length, SZ_4K), &end) ||
+	    check_add_overflow(ctx->mr->virt_addr, ctx->mr->length, &mr_end) ||
+	    ctx->address < ctx->mr->virt_addr || end > mr_end ||
+	    (ctx->address - ctx->mr->virt_addr) % SZ_4K)
+		goto fail;
+	*buffer = (struct tbv_dmabuf_buffer) {
+		.mr = ctx->mr->dmabuf,
+		.offset = ctx->address - ctx->mr->virt_addr,
+		.owner = tqp,
+		.context = ctx,
+		.copy = tbv_dmabuf_recv_copy,
+		.alive = tbv_dmabuf_recv_alive,
+		.finish = tbv_dmabuf_recv_finish,
+	};
+	mutex_unlock(&tqp->rx_lock);
+	return 0;
+fail:
+	tbv_mr_put(ctx->mr);
+	kfree(ctx);
+put:
+	mutex_unlock(&tqp->rx_lock);
+	tbv_qp_put(tqp);
+	return ret;
+}
+
+/* Consume the WQE a credit armed, for the WR that arrived on it. Fails if
+ * anything else removed it or advanced the PSN; the armed pages stay valid
+ * either way, and finish() then reports without consuming a WQE. */
+int tbv_ibdev_dmabuf_claim(struct tbv_dmabuf_buffer *buffer,
+			   const struct tbv_native_data_header *hdr)
+{
+	struct tbv_dmabuf_recv_ctx *ctx = buffer->context;
+	struct tbv_qp *tqp = ctx->tqp;
+	unsigned long flags;
+	int ret = -ESTALE;
+
+	if (!ctx->peeked || ctx->has_recv)
+		return -EINVAL;
+	mutex_lock(&tqp->rx_lock);
+	if (hdr->psn != tqp->rx_expected_psn || hdr->length != ctx->hdr.length ||
+	    !tbv_qp_allows_post(tqp))
+		goto out;
+	/* The sequence check and the removal share one lock hold, so the
+	 * consumed WQE is the one whose pages the credit armed. */
+	spin_lock_irqsave(&tqp->lock, flags);
+	if (tqp->recv_popped == ctx->recv_popped && tqp->recv_count &&
+	    !tqp->closing) {
+		memset(&tqp->recvq[tqp->recv_head], 0,
+		       sizeof(tqp->recvq[tqp->recv_head]));
+		tqp->recv_head = (tqp->recv_head + 1) % tqp->recvq_size;
+		tqp->recv_count--;
+		tqp->recv_popped++;
+		if (tqp->recv_credits_advertised)
+			tqp->recv_credits_advertised--;
+		atomic_dec(&tqp->owner->verbs_recv_wqes);
+		ctx->has_recv = true;
+		ctx->hdr = *hdr;
+		ret = 0;
+	}
+	spin_unlock_irqrestore(&tqp->lock, flags);
+out:
+	mutex_unlock(&tqp->rx_lock);
+	return ret;
 }
 
 static const struct ib_device_ops tbv_ibdev_ops = {
@@ -10002,6 +9968,7 @@ static const struct ib_device_ops tbv_ibdev_ops = {
 	.poll_cq = tbv_poll_cq,
 	.req_notify_cq = tbv_req_notify_cq,
 	.reg_user_mr = tbv_reg_user_mr,
+	.reg_user_mr_dmabuf = tbv_reg_user_mr_dmabuf,
 	.dereg_mr = tbv_dereg_mr,
 
 	INIT_RDMA_OBJ_SIZE(ib_ucontext, tbv_ucontext, base),
@@ -10072,13 +10039,14 @@ static int tbv_ibdev_register_one(struct tbv_state *state,
 	}
 
 	/*
-	 * This is a software verbs provider. User MRs remain pinned by
-	 * the RDMA umem helpers, and kernel local-DMA SGEs must stay
-	 * CPU-visible for MAD/CM QP1 handling. Keep the Thunderbolt ring
-	 * device as the parent, but use RDMA-core virtual DMA for verbs
-	 * buffer addresses.
+	 * The ordinary software provider uses RDMA-core virtual DMA so
+	 * kernel local-DMA SGEs stay CPU-visible for MAD/CM QP1 handling.
+	 * Descriptor verbs has no QP1 and must give the umem DMA-BUF helpers
+	 * a real importer device. Its MR lifetime anchor uses this rail's
+	 * NHI; descriptor mappings still attach to each actual NHI separately.
 	 */
-	ret = ib_register_device(&dev->base, name, NULL);
+	ret = ib_register_device(&dev->base, name,
+				 tbv_dmabuf_verbs_enabled() ? dma_device : NULL);
 	if (ret) {
 		tbv_ibdev_detach_netdev(dev);
 		put_device(dma_device);

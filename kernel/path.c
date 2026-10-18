@@ -623,32 +623,6 @@ void tbv_path_init(struct tbv_path *path,
 	path->remote_transmit_path = -1;
 }
 
-void tbv_path_reset(struct tbv_path *path)
-{
-	path->tx_ring = NULL;
-	path->rx_ring = NULL;
-	memset(path, 0, sizeof(*path));
-	path->state = TBV_PATH_STOPPED;
-	spin_lock_init(&path->build_lock);
-	INIT_LIST_HEAD(&path->build_jobs);
-	INIT_WORK(&path->build_work, tbv_ibdev_path_build_work);
-	spin_lock_init(&path->tx_lock);
-	INIT_LIST_HEAD(&path->tx_free);
-	INIT_LIST_HEAD(&path->tx_control_free);
-	INIT_LIST_HEAD(&path->tx_data_free);
-	INIT_LIST_HEAD(&path->tx_control_queue);
-	INIT_LIST_HEAD(&path->tx_data_queue);
-	INIT_LIST_HEAD(&path->tx_zcopy_inflight);
-	INIT_DELAYED_WORK(&path->tx_poll_work, tbv_path_tx_poll_work);
-	INIT_DELAYED_WORK(&path->rx_supp_poll_work,
-			  tbv_path_rx_supp_poll_work);
-	atomic_set(&path->tx_inflight, 0);
-	path->local_transmit_path = -1;
-	path->local_tx_hop = -1;
-	path->local_rx_hop = -1;
-	path->remote_transmit_path = -1;
-}
-
 static void tbv_path_tx_complete(struct tb_ring *ring, struct ring_frame *frame,
 				 bool canceled)
 {
@@ -1293,6 +1267,14 @@ int tbv_path_alloc_rings(struct tbv_path *path, struct tb_xdomain *xd,
 	ret = tbv_path_configure_ring_throttling(path);
 	if (ret)
 		goto err_rx_ring;
+	if (tbv_gpu_direct_enabled() || tbv_dmabuf_verbs_enabled()) {
+		/* Exclusive pool mode: userspace arms RX in imported GPU pages
+		 * before telling its peer to transmit. No staging frames or verbs
+		 * data/credit packets may occupy these rings. */
+		path->tx_poll_enabled = false;
+		path->state = TBV_PATH_RING_ALLOCATED;
+		return 0;
+	}
 	ret = tbv_path_alloc_frames(path, true);
 	if (ret)
 		goto err_rx_ring;
@@ -2315,26 +2297,6 @@ int tbv_path_enqueue_prepared_reserved(struct tbv_path *path,
 	return ret;
 }
 
-int tbv_path_send_owned_list_reserved(struct tbv_path *path,
-				      struct list_head *frames,
-				      unsigned int send_flags,
-				      tbv_path_tx_done_fn done,
-				      void *done_ctx)
-{
-	LIST_HEAD(packets);
-	u32 packet_count;
-	int ret;
-
-	ret = tbv_path_prepare_owned_list(path, frames, &packets,
-					  &packet_count, send_flags, done,
-					  done_ctx);
-	if (ret)
-		return ret;
-
-	return tbv_path_enqueue_prepared_reserved(path, &packets,
-						  packet_count, send_flags);
-}
-
 int tbv_path_send_page_stream(struct tbv_path *path,
 			      const struct tbv_native_data_header *hdr,
 			      u32 total_length, unsigned int send_flags,
@@ -2639,9 +2601,14 @@ void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)
 		}
 	}
 	if (rings_started) {
-		if (path->rx_ring)
+		/* The exclusive GPU session drains its rings before dropping its
+		 * last rail reference. Preserve tunnel teardown without stopping
+		 * those already-stopped rings a second time. */
+		bool stopped = path->rail && READ_ONCE(path->rail->gpu_direct_used);
+
+		if (path->rx_ring && !stopped)
 			tb_ring_stop(path->rx_ring);
-		if (path->tx_ring)
+		if (path->tx_ring && !stopped)
 			tb_ring_stop(path->tx_ring);
 		path->state = TBV_PATH_RING_ALLOCATED;
 	}

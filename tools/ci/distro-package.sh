@@ -73,6 +73,7 @@ stage_source() {
 		dkms.conf \
 		LICENSE \
 		README.md \
+		include \
 		kernel \
 		proto \
 		| tar -C "$stage" -xf -

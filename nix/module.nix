@@ -3,11 +3,13 @@
   stdenv,
   kernel,
   source ? ../.,
+  enableProfiling ? true,
 }:
 
 let
   root = source;
   rootPrefix = "${toString root}/";
+  sourceEntries = [ "Makefile" "include" "kernel" "proto" ];
 in
 stdenv.mkDerivation {
   pname = "thunderbolt-ibverbs";
@@ -19,11 +21,7 @@ stdenv.mkDerivation {
       let
         rel = lib.removePrefix rootPrefix (toString path);
       in
-        rel == "Makefile"
-        || rel == "kernel"
-        || lib.hasPrefix "kernel/" rel
-        || rel == "proto"
-        || lib.hasPrefix "proto/" rel;
+        builtins.any (entry: rel == entry || lib.hasPrefix "${entry}/" rel) sourceEntries;
   };
 
   nativeBuildInputs = kernel.moduleBuildDependencies;
@@ -31,6 +29,7 @@ stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
     make \
+      TBV_PROFILING=${if enableProfiling then "1" else "0"} \
       KVER=${kernel.modDirVersion} \
       KDIR=${kernel.dev}/lib/modules/${kernel.modDirVersion}/build \
       modules

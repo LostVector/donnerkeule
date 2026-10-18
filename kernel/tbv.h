@@ -279,6 +279,7 @@ struct tbv_rail {
 	u32 native_attempts;
 	u32 native_tunnel_attempts;
 	u32 native_ready_attempts;
+	u32 native_control_attempts;
 	int native_last_error;
 	/*
 	 * Physical lane index for native rails (0..TBV_NATIVE_MAX_LANES-1).
@@ -292,6 +293,8 @@ struct tbv_rail {
 	u32 native_lane;
 	bool active;
 	bool removing;
+	/* Direct raw pools cannot be reused after close or a failed session. */
+	bool gpu_direct_used;
 	/*
 	 * Registration unwinding marker. Set under state->rail_register_lock
 	 * when ib_register_device() returns nonzero for this rail. While true
@@ -323,6 +326,14 @@ struct tbv_peer {
 	struct ida rail_ids;
 	/* Serializes XDomain control and tunnel setup transactions per link. */
 	struct mutex control_lock;
+	/* Control storage lives until the peer is destroyed, and is stopped
+	 * before any rail teardown drains verbs/data callbacks. */
+	struct mutex dmabuf_control_lock;
+	struct tbv_control *dmabuf_control;
+	bool dmabuf_control_dead;
+	bool remote_control_ring;
+	bool remote_push_done;
+	bool remote_dmabuf_credit;
 	u32 native_qp_rr_rail_id;
 	u32 nr_rails;
 	/*
@@ -332,6 +343,8 @@ struct tbv_peer {
 	 */
 	u8 remote_host_id[16];
 	bool remote_host_known;
+	/* Descriptor rendezvous replay watermark, protected by state->lock. */
+	u64 dmabuf_rx_token;
 };
 
 static inline bool tbv_rail_data_ready(const struct tbv_rail *rail)
@@ -753,15 +766,12 @@ int tbv_tbnet_arp_reply_for_request(void *reply, size_t reply_size,
 int tbv_tbnet_minimal_start(struct tbv_tbnet_identity *identity);
 void tbv_tbnet_minimal_stop(struct tbv_tbnet_identity *identity);
 void tbv_tbnet_minimal_recompute_state_locked(struct tbv_tbnet_identity *identity);
-bool tbv_tbnet_minimal_neighbor_ready(struct tbv_tbnet_identity *identity,
-				      const uuid_t *remote_uuid);
 bool tbv_tbnet_minimal_path_ready(struct tbv_tbnet_identity *identity,
 				  const uuid_t *remote_uuid);
 void tbv_tbnet_minimal_clear_neighbors_locked(struct tbv_tbnet_identity *identity);
 void tbv_tbnet_minimal_debugfs_show(struct seq_file *s,
 				    struct tbv_tbnet_identity *identity);
 void tbv_services_tbnet_identity_ready(struct tbv_tbnet_identity *identity);
-struct tb_property_dir *tbv_service_create_native_dir(void);
 struct tb_property_dir *tbv_service_create_apple_dir(u32 prtcstns);
 int tbv_services_start(struct tbv_state *state, bool bind_services,
 		       const struct tbv_service_config *service_cfg);
@@ -781,8 +791,6 @@ void tbv_native_control_init_rail(struct tbv_rail *rail,
 void tbv_native_control_queue_rail(struct tbv_state *state,
 				   struct tbv_rail *rail);
 void tbv_native_control_cancel_rail(struct tbv_rail *rail);
-int tbv_native_control_exchange(struct tbv_state *state, struct tbv_peer *peer,
-				struct tbv_rail *rail);
 void tbv_rail_key_init(struct tbv_rail_key *key, u64 route,
 		       u32 local_adapter, u32 remote_adapter, u32 path_id);
 int tbv_rail_key_cmp(const struct tbv_rail_key *a,
@@ -805,7 +813,6 @@ void tbv_path_init_optional_symbols(void);
 void tbv_path_exit_optional_symbols(void);
 void tbv_path_init(struct tbv_path *path,
 		   const struct tbv_path_config *cfg, struct tbv_rail *rail);
-void tbv_path_reset(struct tbv_path *path);
 const char *tbv_path_state_name(enum tbv_path_state state);
 int tbv_path_alloc_rings(struct tbv_path *path, struct tb_xdomain *xd,
 			 int requested_transmit_path);
@@ -827,11 +834,6 @@ int tbv_path_send_owned(struct tbv_path *path, void *data, u32 len,
 int tbv_path_send_marked_owned(struct tbv_path *path, void *data, u32 len,
 			       u8 sof, u8 eof, unsigned int flags,
 			       tbv_path_tx_done_fn done, void *done_ctx);
-int tbv_path_send_owned_list_reserved(struct tbv_path *path,
-				      struct list_head *frames,
-				      unsigned int flags,
-				      tbv_path_tx_done_fn done,
-				      void *done_ctx);
 int tbv_path_prepare_owned_list(struct tbv_path *path,
 				struct list_head *frames,
 				struct list_head *packets,
@@ -877,5 +879,14 @@ int tbv_core_init(struct tbv_state *state,
 		  const struct tbv_resolved_config *cfg,
 		  const struct tbv_tbnet_identity_config *identity_cfg);
 void tbv_core_exit(struct tbv_state *state);
+
+bool tbv_gpu_direct_enabled(void);
+u64 tbv_gpu_direct_work_kicks(void);
+u64 tbv_gpu_direct_wait_after_kick(void);
+int tbv_gpu_direct_start(struct tbv_state *state);
+void tbv_gpu_direct_stop(void);
+void tbv_gpu_direct_disconnect(struct tbv_rail *rail);
+
+#include "verbs_dmabuf.h"
 
 #endif

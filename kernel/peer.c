@@ -9,6 +9,7 @@
 #include <linux/thunderbolt.h>
 
 #include "tbv.h"
+#include "verbs_control.h"
 
 #define TBV_NATIVE_E2E_AUTO	(-1)
 
@@ -135,6 +136,7 @@ struct tbv_peer *tbv_peer_get_or_create(struct tbv_state *state,
 	peer->xd = tb_xdomain_get(xd);
 	INIT_LIST_HEAD(&peer->rails);
 	mutex_init(&peer->control_lock);
+	mutex_init(&peer->dmabuf_control_lock);
 
 	mutex_lock(&state->lock);
 	list_for_each_entry(pos, &state->peers, node) {
@@ -200,6 +202,7 @@ void tbv_peer_put(struct tbv_state *state, struct tbv_peer *peer)
 	pr_info("peer %u destroyed backend=%s\n", peer->peer_id,
 		tbv_backend_name(peer->backend));
 	ida_destroy(&peer->rail_ids);
+	tbv_control_destroy(peer);
 	tb_xdomain_put(peer->xd);
 	kfree(peer);
 }
@@ -317,6 +320,7 @@ void tbv_peer_remove_rail(struct tbv_rail *rail)
 	mutex_lock(&peer->state->lock);
 	rail->removing = true;
 	mutex_unlock(&peer->state->lock);
+	tbv_control_stop(peer);
 
 	/*
 	 * Tear down the per-rail ib_device (if any) before the path. Any QPs
@@ -326,6 +330,8 @@ void tbv_peer_remove_rail(struct tbv_rail *rail)
 	 * verbs lifecycle and removes any chance of post_send racing
 	 * tbv_path_destroy.
 	 */
+	tbv_gpu_direct_disconnect(rail);
+	tbv_dmabuf_disconnect(rail);
 	tbv_ibdev_rail_event(peer->state, rail, false);
 
 	tbv_native_control_cancel_rail(rail);

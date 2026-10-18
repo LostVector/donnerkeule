@@ -26,6 +26,7 @@ let
   # Full Linux set. ibv_trace is an LD_PRELOAD tracer built as .so.
   linuxPrograms = darwinPrograms ++ [
     "rc_qpn_churn"
+    "rc_write_imm_verify"
     "rdma_gid_probe"
   ];
 
@@ -54,6 +55,7 @@ stdenv.mkDerivation {
         rel = baseNameOf (toString path);
       in
         lib.hasSuffix ".c" rel
+        || lib.hasSuffix ".h" rel
         || lib.hasSuffix ".py" rel
         || lib.hasSuffix ".sh" rel;
   };
@@ -106,6 +108,7 @@ stdenv.mkDerivation {
     mkdir -p $out/bin
     install -m 0755 ${lib.concatStringsSep " " cPrograms} $out/bin/
     install -m 0755 ${lib.concatStringsSep " " scripts} $out/bin/
+    install -m 0644 tbv_bench.py $out/bin/
     ${lib.optionalString (!isDarwin) ''
       mkdir -p $out/lib
       install -m 0644 libibv_trace.so $out/lib/

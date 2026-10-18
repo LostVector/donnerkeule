@@ -200,6 +200,7 @@ let
       export TBV_RDMA_CORE=${rdma-core-usb4}
       export TBV_PERFTEST=${perftest}
       ${lib.optionalString (perftestDarwin != null) "export TBV_PERFTEST_DARWIN=${perftestDarwin}"}
+      export PYTHONPATH=${pkgs.writeTextDir "tbv_bench.py" (builtins.readFile ../../userspace/bench/tbv_bench.py)}:"''${PYTHONPATH:-}"
       exec ${pkgs.python3}/bin/python3 -u ${runnerSrc} --plan ${planFile} "$@"
     '';
     meta = {

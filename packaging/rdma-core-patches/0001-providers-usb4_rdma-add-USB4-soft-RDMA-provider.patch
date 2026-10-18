@@ -10,11 +10,11 @@ devices.
 Source: https://github.com/hellas-ai/thunderbolt-ibverbs
 ---
  providers/usb4_rdma/CMakeLists.txt   |  14 +
- providers/usb4_rdma/usb4_rdma.c      | 370 +++++++++++++++++++++++++++
+ providers/usb4_rdma/usb4_rdma.c      | 365 +++++++++++++++++++++++++++
  providers/usb4_rdma/usb4_rdma.driver |   1 +
  providers/usb4_rdma/usb4_rdma.h      |  26 ++
- providers/usb4_rdma/usb4_rdma_abi.h  |  15 ++
- 5 files changed, 426 insertions(+)
+ providers/usb4_rdma/usb4_rdma_abi.h  |  12 ++
+ 5 files changed, 418 insertions(+)
  create mode 100644 providers/usb4_rdma/CMakeLists.txt
  create mode 100644 providers/usb4_rdma/usb4_rdma.c
  create mode 100644 providers/usb4_rdma/usb4_rdma.driver
@@ -43,24 +43,19 @@ index 0000000..c45c710
 +)
 diff --git a/providers/usb4_rdma/usb4_rdma.c b/providers/usb4_rdma/usb4_rdma.c
 new file mode 100644
-index 0000000..9c34ff8
+index 0000000..9cdb342
 --- /dev/null
 +++ b/providers/usb4_rdma/usb4_rdma.c
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,365 @@
 +// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 +/*
-+ * usb4_rdma userspace verbs provider — Tier 1 skeleton.
++ * Userspace verbs provider for the TBV kernel RDMA devices.
 + *
-+ * Tracks the kernel-side ibdev.c: most data-plane verbs return
-+ * the kernel's -ENOSYS straight to the application. Just enough
-+ * here for `ibv_devinfo` to find and open the device, and for
-+ * `ibv_alloc_pd`/`ibv_dealloc_pd` to round-trip through the
-+ * generic uverbs ioctl machinery.
++ * Standard verbs commands are forwarded through the generic kernel
++ * uverbs interface, including QPs, MRs, DMA-BUF registration and CQ events.
 + *
-+ * Matching: prefer the fixed module node GUIDs, with the kernel device names
-+ * as a fallback. We do not have an upstream RDMA_DRIVER_USB4_RDMA enum value
-+ * yet, and distro rdma-core udev rules may rename the devices away from
-+ * usb4_rdmaN/usb4_appleN.
++ * Device matching accepts kernel device names or fixed module node GUIDs.
++ * Context allocation uses RDMA_DRIVER_UNKNOWN.
 + */
 +
 +#include <errno.h>
@@ -77,7 +72,7 @@ index 0000000..9c34ff8
 +
 +static void usb4_rdma_free_context(struct ibv_context *ibv_ctx);
 +
-+/* ----- query stubs ------------------------------------------------ */
++/* ----- device queries --------------------------------------------- */
 +
 +static int usb4_rdma_query_device(struct ibv_context *ctx,
 +				  const struct ibv_query_device_ex_input *in,
@@ -458,21 +453,18 @@ index 0000000..6267710
 +#endif /* USB4_RDMA_H */
 diff --git a/providers/usb4_rdma/usb4_rdma_abi.h b/providers/usb4_rdma/usb4_rdma_abi.h
 new file mode 100644
-index 0000000..5fd8c2f
+index 0000000..8fd0fc7
 --- /dev/null
 +++ b/providers/usb4_rdma/usb4_rdma_abi.h
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,12 @@
 +/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 +#ifndef USB4_RDMA_ABI_H
 +#define USB4_RDMA_ABI_H
 +
 +#include <infiniband/kern-abi.h>
 +
-+/* No driver-specific uapi structs yet; we ride entirely on the
-+ * generic ib_uverbs_* messages defined in <rdma/ib_user_verbs.h>.
-+ * When we add custom ops (e.g., GID/UUID exchange, peer addressing)
-+ * a kernel-side <rdma/usb4_rdma_user.h> will land in include/uapi/rdma/
-+ * and we'll mirror it here. */
++/* This provider uses the generic ib_uverbs_* messages without
++ * driver-specific uapi structures. */
 +
 +#define USB4_RDMA_ABI_VERSION 1
 +

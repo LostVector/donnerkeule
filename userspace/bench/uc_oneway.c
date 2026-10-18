@@ -44,6 +44,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "tbv_bench.h"
+
 struct opts {
 	const char *role;
 	const char *dev;
@@ -73,14 +75,6 @@ struct peer_info {
 	uint32_t lid;
 	uint8_t gid[16];
 };
-
-static uint64_t now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
 
 static void debug_step(const char *step)
 {
@@ -330,44 +324,6 @@ static int parse_opts(int argc, char **argv, struct opts *o)
 	return 0;
 }
 
-static int send_all(int fd, const void *buf, size_t len)
-{
-	const char *p = buf;
-
-	while (len) {
-		ssize_t n = send(fd, p, len, 0);
-
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			return -1;
-		}
-		p += n;
-		len -= (size_t)n;
-	}
-	return 0;
-}
-
-static int recv_all(int fd, void *buf, size_t len)
-{
-	char *p = buf;
-
-	while (len) {
-		ssize_t n = recv(fd, p, len, 0);
-
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			return -1;
-		}
-		if (!n)
-			return -1;
-		p += n;
-		len -= (size_t)n;
-	}
-	return 0;
-}
-
 static int tcp_listen(int port)
 {
 	struct sockaddr_in addr;
@@ -460,8 +416,8 @@ static struct ibv_context *open_dev(const char *name)
 static int exchange_info(int fd, const struct peer_info *local,
 			 struct peer_info *remote)
 {
-	if (send_all(fd, local, sizeof(*local)) ||
-	    recv_all(fd, remote, sizeof(*remote))) {
+	if (tbv_bench_send_all(fd, local, sizeof(*local)) ||
+	    tbv_bench_recv_all(fd, remote, sizeof(*remote))) {
 		perror("metadata exchange");
 		return -1;
 	}
@@ -674,7 +630,7 @@ static int check_seen(uint8_t *seen, int count, uint64_t observed_seq,
 static void print_rate(const char *role, int done, int count, size_t size,
 		       uint64_t start, uint64_t *last_t, int *last_done)
 {
-	uint64_t now = now_ns();
+	uint64_t now = tbv_bench_now_ns();
 
 	if (now - *last_t < 1000000000ull && done != count)
 		return;
@@ -983,11 +939,11 @@ int main(int argc, char **argv)
 		char ready = 'B';
 		char peer_ready;
 
-		if (send_all(sock, &ready, 1)) {
+		if (tbv_bench_send_all(sock, &ready, 1)) {
 			perror("bidi ready send");
 			goto out_qp;
 		}
-		if (recv_all(sock, &peer_ready, 1) || peer_ready != 'B') {
+		if (tbv_bench_recv_all(sock, &peer_ready, 1) || peer_ready != 'B') {
 			fprintf(stderr, "peer did not signal bidi ready\n");
 			goto out_qp;
 		}
@@ -995,7 +951,7 @@ int main(int argc, char **argv)
 		char ready;
 		char ack = 'A';
 
-		if (recv_all(sock, &ready, 1) || ready != 'R') {
+		if (tbv_bench_recv_all(sock, &ready, 1) || ready != 'R') {
 			fprintf(stderr, "receiver did not signal ready\n");
 			goto out_qp;
 		}
@@ -1004,7 +960,7 @@ int main(int argc, char **argv)
 		 * side QP-registration race window where the first SENDs
 		 * arrive at the receiver before its lookup_qp can find the
 		 * QP, charging up rx_no_qp and poisoning credit accounting. */
-		if (send_all(sock, &ack, 1)) {
+		if (tbv_bench_send_all(sock, &ack, 1)) {
 			perror("ack send");
 			goto out_qp;
 		}
@@ -1012,17 +968,17 @@ int main(int argc, char **argv)
 		char ready = 'R';
 		char ack;
 
-		if (send_all(sock, &ready, 1)) {
+		if (tbv_bench_send_all(sock, &ready, 1)) {
 			perror("ready send");
 			goto out_qp;
 		}
-		if (recv_all(sock, &ack, 1) || ack != 'A') {
+		if (tbv_bench_recv_all(sock, &ack, 1) || ack != 'A') {
 			fprintf(stderr, "sender did not ack ready\n");
 			goto out_qp;
 		}
 	}
 
-	start = now_ns();
+	start = tbv_bench_now_ns();
 	last_t = start;
 	if (is_bidi) {
 		struct ibv_wc wc[32];
@@ -1140,11 +1096,11 @@ int main(int argc, char **argv)
 			char done = 'D';
 			char peer_done;
 
-			if (send_all(sock, &done, 1)) {
+			if (tbv_bench_send_all(sock, &done, 1)) {
 				perror("bidi done send");
 				goto out_qp;
 			}
-			if (recv_all(sock, &peer_done, 1) || peer_done != 'D') {
+			if (tbv_bench_recv_all(sock, &peer_done, 1) || peer_done != 'D') {
 				fprintf(stderr, "peer did not signal bidi done\n");
 				goto out_qp;
 			}

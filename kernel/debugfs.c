@@ -6,6 +6,7 @@
 
 #include "../proto/native_wire.h"
 #include "tbv.h"
+#include "verbs_control.h"
 
 static u32 tbv_debugfs_wire_path_flags(const struct tbv_path *path)
 {
@@ -116,6 +117,11 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   state->native_fragment_striping);
 	seq_printf(s, "native_write_striping: %u\n",
 		   state->native_write_striping);
+	seq_printf(s, "gpu_direct: %u\n", tbv_gpu_direct_enabled());
+	seq_printf(s, "gpu_direct_work_kicks: %llu\n", tbv_gpu_direct_work_kicks());
+	seq_printf(s, "gpu_direct_wait_after_kick: %llu\n",
+		   tbv_gpu_direct_wait_after_kick());
+	tbv_dmabuf_debugfs_show(s);
 	seq_printf(s, "native_write_stripe_min_bytes: %u\n",
 		   state->native_write_stripe_min_bytes);
 	seq_printf(s, "native_domain_mask: 0x%x\n", state->native_domain_mask);
@@ -409,6 +415,7 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 			   peer->xd && peer->xd->tb ? peer->xd->tb->index : -1,
 			   peer->remote_host_known ? peer->remote_host_id :
 			   (const u8[16]){ 0 });
+		tbv_control_debugfs_show(s, peer);
 
 		list_for_each_entry(rail, &peer->rails, node) {
 			bool service_ready;
@@ -423,7 +430,7 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 			}
 
 			seq_printf(s,
-				   "  rail=0x%x route=0x%llx local=%u remote=%u path=%u link_speed=%uGb/s link_width=0x%x active=%u service_ready=%u data_ready=%u native_qp_bind_count=%d apple_tunnel_qps=%u state=%s negotiated=%u ready_sent=%u remote_ready=%u attempts=%u last_error=%d local_out=%d local_tx=%d local_rx=%d remote_rail=0x%x remote_out=%d remote_tx=%d remote_rx=%d\n",
+				   "  rail=0x%x route=0x%llx local=%u remote=%u path=%u link_speed=%uGb/s link_width=0x%x active=%u service_ready=%u data_ready=%u native_qp_bind_count=%d apple_tunnel_qps=%u state=%s negotiated=%u ready_sent=%u remote_ready=%u attempts=%u last_error=%d local_out=%d local_tx=%d local_rx=%d remote_rail=0x%x remote_out=%d remote_tx=%d remote_rx=%d gpu_stopped=%u\n",
 				   rail->rail_id, rail->key.route,
 				   rail->key.local_adapter,
 				   rail->key.remote_adapter,
@@ -448,7 +455,8 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 				   rail->remote_rail_id,
 				   rail->remote_transmit_path,
 				   rail->remote_tx_hop,
-				   rail->remote_rx_hop);
+				   rail->remote_rx_hop,
+				   READ_ONCE(rail->gpu_direct_used));
 			seq_printf(s,
 				   "    data_tx_enqueued=%lld data_tx_posted=%lld data_tx_completed=%lld data_tx_credit_stalls=%lld data_tx_credit_received=%lld tx_credits=%u/%u\n",
 				   atomic64_read(&rail->path.data_tx_enqueued),
@@ -537,6 +545,7 @@ int tbv_debugfs_init(struct tbv_state *state)
 			    &tbv_debugfs_summary_fops);
 	debugfs_create_file("peers", 0444, state->debugfs_dir, state,
 			    &tbv_debugfs_peers_fops);
+	tbv_control_debugfs_init(state, state->debugfs_dir);
 	debugfs_create_file("configured_links", 0444, state->debugfs_dir,
 			    state, &tbv_debugfs_configured_links_fops);
 	return 0;
@@ -544,6 +553,7 @@ int tbv_debugfs_init(struct tbv_state *state)
 
 void tbv_debugfs_exit(struct tbv_state *state)
 {
+	tbv_control_debugfs_exit();
 	debugfs_remove_recursive(state->debugfs_dir);
 	state->debugfs_dir = NULL;
 }

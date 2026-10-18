@@ -34,6 +34,8 @@
 #define MAGIC 0x54425749u
 #define POISON 0xa5
 
+#include "tbv_bench.h"
+
 struct opts {
 	const char *role;
 	const char *dev;
@@ -60,98 +62,6 @@ struct wire_info {
 	uint64_t slot_size;
 	uint8_t gid[16];
 };
-
-static uint64_t now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-static int send_all(int fd, const void *buf, size_t len)
-{
-	const char *p = buf;
-
-	while (len) {
-		ssize_t n = send(fd, p, len, 0);
-
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			return -1;
-		}
-		p += n;
-		len -= (size_t)n;
-	}
-	return 0;
-}
-
-static int recv_all(int fd, void *buf, size_t len)
-{
-	char *p = buf;
-
-	while (len) {
-		ssize_t n = recv(fd, p, len, 0);
-
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			return -1;
-		}
-		if (!n)
-			return -1;
-		p += n;
-		len -= (size_t)n;
-	}
-	return 0;
-}
-
-static int tcp_listen(int port)
-{
-	struct sockaddr_in addr = {};
-	int fd;
-	int one = 1;
-
-	fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (fd < 0)
-		return -1;
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	addr.sin_port = htons((uint16_t)port);
-	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) ||
-	    listen(fd, 1)) {
-		close(fd);
-		return -1;
-	}
-	return fd;
-}
-
-static int tcp_connect(const char *host, int port)
-{
-	struct addrinfo hints = {};
-	struct addrinfo *res = NULL;
-	char port_s[16];
-	int fd = -1;
-
-	snprintf(port_s, sizeof(port_s), "%d", port);
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	if (getaddrinfo(host, port_s, &hints, &res))
-		return -1;
-	for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-		fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-		if (fd < 0)
-			continue;
-		if (!connect(fd, ai->ai_addr, ai->ai_addrlen))
-			break;
-		close(fd);
-		fd = -1;
-	}
-	freeaddrinfo(res);
-	return fd;
-}
 
 static void usage(const char *argv0)
 {
@@ -385,7 +295,7 @@ static int run_recv(const struct opts *o, int fd, struct ibv_qp *qp,
 
 		/* The sender's total arrives once it stops posting. */
 		if (total == UINT32_MAX && poll(&pfd, 1, 0) > 0 &&
-		    recv_all(fd, &total, sizeof(total)))
+		    tbv_bench_recv_all(fd, &total, sizeof(total)))
 			return -1;
 
 		n = ibv_poll_cq(cq, 1, &wc);
@@ -427,13 +337,13 @@ static int run_recv(const struct opts *o, int fd, struct ibv_qp *qp,
 		memset(slot, POISON, len);
 		bytes += len;
 		next = seq + 1;
-		if (post_recv(qp, seq) || send_all(fd, &next, sizeof(next)))
+		if (post_recv(qp, seq) || tbv_bench_send_all(fd, &next, sizeof(next)))
 			return -1;
 	}
 
 	printf("recv_check messages=%u bytes=%" PRIu64 " errors=%u\n",
 	       next, bytes, errors);
-	return send_all(fd, &errors, sizeof(errors)) ? -1 : (errors ? 1 : 0);
+	return tbv_bench_send_all(fd, &errors, sizeof(errors)) ? -1 : (errors ? 1 : 0);
 }
 
 /* Sender: write messages while the receiver keeps up, for --seconds. */
@@ -441,7 +351,7 @@ static int run_send(const struct opts *o, int fd, struct ibv_qp *qp,
 		    struct ibv_cq *cq, struct ibv_mr *mr, uint8_t *buf,
 		    const struct wire_info *remote)
 {
-	uint64_t start = now_ns();
+	uint64_t start = tbv_bench_now_ns();
 	uint64_t deadline = start + (uint64_t)(o->seconds * 1e9);
 	uint32_t posted = 0;
 	uint32_t completed = 0;
@@ -452,12 +362,12 @@ static int run_send(const struct opts *o, int fd, struct ibv_qp *qp,
 
 	for (;;) {
 		struct pollfd pfd = { .fd = fd, .events = POLLIN };
-		bool stop = now_ns() >= deadline;
+		bool stop = tbv_bench_now_ns() >= deadline;
 		struct ibv_wc wc;
 		int n;
 
 		while (poll(&pfd, 1, 0) > 0) {
-			if (recv_all(fd, &checked, sizeof(checked))) {
+			if (tbv_bench_recv_all(fd, &checked, sizeof(checked))) {
 				fprintf(stderr, "receiver closed the connection after %u checked, %u posted, %u completed\n",
 					checked, posted, completed);
 				return -1;
@@ -511,14 +421,14 @@ static int run_send(const struct opts *o, int fd, struct ibv_qp *qp,
 		completed++;
 	}
 
-	secs = (double)(now_ns() - start) / 1e9;
-	if (send_all(fd, &posted, sizeof(posted)))
+	secs = (double)(tbv_bench_now_ns() - start) / 1e9;
+	if (tbv_bench_send_all(fd, &posted, sizeof(posted)))
 		return -1;
 	while (checked != posted) {
-		if (recv_all(fd, &checked, sizeof(checked)))
+		if (tbv_bench_recv_all(fd, &checked, sizeof(checked)))
 			return -1;
 	}
-	if (recv_all(fd, &errors, sizeof(errors)))
+	if (tbv_bench_recv_all(fd, &errors, sizeof(errors)))
 		return -1;
 	printf("send_complete messages=%u bytes=%" PRIu64 " seconds=%.2f gbit_s=%.2f receiver_errors=%u\n",
 	       posted, bytes, secs, (double)bytes * 8 / secs / 1e9, errors);
@@ -550,14 +460,14 @@ int main(int argc, char **argv)
 	}
 
 	if (!strcmp(o.role, "recv")) {
-		listen_fd = tcp_listen(o.tcp_port);
+		listen_fd = tbv_bench_tcp_listen(o.tcp_port);
 		if (listen_fd < 0) {
 			perror("listen");
 			goto out;
 		}
 		fd = accept(listen_fd, NULL, NULL);
 	} else {
-		fd = tcp_connect(o.connect_host, o.tcp_port);
+		fd = tbv_bench_tcp_connect(o.connect_host, o.tcp_port);
 	}
 	if (fd < 0) {
 		perror("tcp");
@@ -605,7 +515,7 @@ int main(int argc, char **argv)
 
 	local.magic = MAGIC;
 	local.qpn = qp->qp_num;
-	local.psn = (uint32_t)(now_ns() & 0xffffffu);
+	local.psn = (uint32_t)(tbv_bench_now_ns() & 0xffffffu);
 	local.lid = port_attr.lid;
 	local.rkey = mr->rkey;
 	local.slots = o.slots;
@@ -613,8 +523,8 @@ int main(int argc, char **argv)
 	local.slot_size = o.max_size;
 	memcpy(local.gid, &gid, sizeof(local.gid));
 
-	if (send_all(fd, &local, sizeof(local)) ||
-	    recv_all(fd, &remote, sizeof(remote)) ||
+	if (tbv_bench_send_all(fd, &local, sizeof(local)) ||
+	    tbv_bench_recv_all(fd, &remote, sizeof(remote)) ||
 	    remote.magic != MAGIC || remote.slots != o.slots ||
 	    remote.slot_size != o.max_size) {
 		fprintf(stderr, "metadata exchange failed (slots and max-size must match)\n");
