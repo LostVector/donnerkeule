@@ -430,7 +430,7 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 			}
 
 			seq_printf(s,
-				   "  rail=0x%x route=0x%llx local=%u remote=%u path=%u link_speed=%uGb/s link_width=0x%x active=%u service_ready=%u data_ready=%u native_qp_bind_count=%d apple_tunnel_qps=%u state=%s negotiated=%u ready_sent=%u remote_ready=%u attempts=%u last_error=%d local_out=%d local_tx=%d local_rx=%d remote_rail=0x%x remote_out=%d remote_tx=%d remote_rx=%d\n",
+				   "  rail=0x%x route=0x%llx local=%u remote=%u path=%u link_speed=%uGb/s link_width=0x%x active=%u service_ready=%u data_ready=%u native_qp_bind_count=%d apple_tunnel_qps=%u state=%s negotiated=%u ready_sent=%u remote_ready=%u attempts=%u last_error=%d local_out=%d local_tx=%d local_rx=%d remote_rail=0x%x remote_out=%d remote_tx=%d remote_rx=%d gpu_stopped=%u\n",
 				   rail->rail_id, rail->key.route,
 				   rail->key.local_adapter,
 				   rail->key.remote_adapter,
@@ -455,7 +455,8 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 				   rail->remote_rail_id,
 				   rail->remote_transmit_path,
 				   rail->remote_tx_hop,
-				   rail->remote_rx_hop);
+				   rail->remote_rx_hop,
+				   READ_ONCE(rail->gpu_direct_used));
 			seq_printf(s,
 				   "    data_tx_enqueued=%lld data_tx_posted=%lld data_tx_completed=%lld data_tx_credit_stalls=%lld data_tx_credit_received=%lld tx_credits=%u/%u\n",
 				   atomic64_read(&rail->path.data_tx_enqueued),
