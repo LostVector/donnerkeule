@@ -556,6 +556,8 @@ static void tbv_dmabuf_stop_rail(struct tbv_rail *rail)
 		WRITE_ONCE(rail->gpu_direct_used, true);
 		tb_ring_stop(rail->path.tx_ring);
 		tb_ring_stop(rail->path.rx_ring);
+		pr_warn_ratelimited("rail %#x stopped after a data error or abort; recreate the connection to use it again\n",
+				    rail->rail_id);
 	}
 	mutex_unlock(&dmabuf_engine.ring_lock);
 }
