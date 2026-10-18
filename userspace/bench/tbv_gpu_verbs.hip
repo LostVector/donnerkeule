@@ -295,6 +295,8 @@ struct Options {
 	unsigned rnr_delay_ms = 0;
 	unsigned depth = 3;
 	unsigned spin_us = 0;
+	unsigned hold_ms = 0;
+	unsigned hold_rank = 0;
 	uint32_t bytes = UINT32_MAX;
 	int operation = -1;
 	bool host_mr = false;
@@ -964,6 +966,8 @@ int main(int argc, char **argv)
 			else if (arg == "--rnr-delay-ms") o.rnr_delay_ms = std::stoul(value());
 			else if (arg == "--depth") o.depth = std::stoul(value());
 			else if (arg == "--spin-us") o.spin_us = std::stoul(value());
+			else if (arg == "--hold-ms") o.hold_ms = std::stoul(value());
+			else if (arg == "--hold-rank") o.hold_rank = std::stoul(value());
 			else if (arg == "--profile") o.profile = value();
 			else if (arg == "--bytes") {
 				const auto bytes = std::stoull(value());
@@ -985,12 +989,14 @@ int main(int argc, char **argv)
 			else throw std::runtime_error("usage: tbv_gpu_verbs [--host IP] [--device DEV] "
 				"[--port N] [--iterations N] [--rounds N] [--gid-index N] "
 				"[--rnr-delay-ms N] [--depth 1|2|3] [--spin-us N] [--bytes N] "
+				"[--hold-ms N --hold-rank 0|1] "
 				"[--op SEND|SEND_IMM|WRITE_IMM|WRITE] [--profile NEW_FILE.jsonl] "
 				"[--host-mr] [--remote-error] [--signal-all] [--late-receives] [--persistent-rq]");
 		}
 		if (!o.iterations || o.iterations > 10000 || !o.rounds || o.rounds > 32 ||
 		    o.port < 1024 || o.port + o.rounds > 65535 || o.gid_index > 255 ||
-		    o.rnr_delay_ms > 10000 || o.spin_us > 10000 || !o.depth || o.depth > 3 ||
+		    o.rnr_delay_ms > 10000 || o.spin_us > 10000 || o.hold_ms > 600000 ||
+		    o.hold_rank > 1 || (o.hold_ms && (o.bytes == UINT32_MAX || o.host_mr)) || !o.depth || o.depth > 3 ||
 		    (!o.host_mr && o.bytes != UINT32_MAX && o.bytes % 32))
 			throw std::runtime_error("option outside test bounds");
 		if (o.persistent_rq && (o.operation < 0 || o.operation > 2 || o.remote_error ||
@@ -1018,6 +1024,30 @@ int main(int argc, char **argv)
 			if (!o.host_mr) probe_bad_sge(link, rdma, tx_pool);
 			link.profile = profile.enabled() ? &profile : nullptr;
 			run(link, rdma, gpu, tx_pool, rx_pool, host_tx, host_rx, o, round, profile, timing);
+			if (o.hold_ms) {
+				// Loss qualification. One more SEND of the tested size makes
+				// the holder re-arm a credit; its next receive WQE stays
+				// posted (armed) while it waits, before QP and MR go away.
+				const uint32_t aligned = (o.bytes + 4095u) / 4096u * 4096u;
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+				if (o.rank == o.hold_rank) {
+					link.post_receive(1ull << 59, rdma.rx, 0, aligned);
+					ibv_wc wc = link.poll(deadline);
+					if (wc.status != IBV_WC_SUCCESS || !(wc.wr_id & recv_bit))
+						throw std::runtime_error("hold: first SEND failed");
+					link.post_receive(1ull << 58, rdma.rx, 0, aligned);
+					printf("HOLD rank=%u armed_receive_bytes=%u ms=%u\n", o.rank, o.bytes, o.hold_ms);
+					fflush(stdout);
+					usleep(o.hold_ms * 1000u);
+				} else {
+					usleep(1000000);
+					link.send(1ull << 59, IBV_WR_SEND, rdma.tx, 0, o.bytes);
+					ibv_wc wc = link.poll(deadline);
+					if (wc.status != IBV_WC_SUCCESS)
+						throw std::runtime_error("hold: SEND failed");
+					printf("HOLD peer sent bytes=%u\n", o.bytes);
+				}
+			}
 			if (o.remote_error) remote_error(link, rdma, o.host_mr);
 		}
 		printf("PASS rounds=%u MR_and_QP_recreation=1\n", o.rounds);
