@@ -1267,10 +1267,10 @@ int tbv_path_alloc_rings(struct tbv_path *path, struct tb_xdomain *xd,
 	ret = tbv_path_configure_ring_throttling(path);
 	if (ret)
 		goto err_rx_ring;
-	if (tbv_gpu_direct_enabled() || tbv_dmabuf_verbs_enabled()) {
-		/* Exclusive pool mode: userspace arms RX in imported GPU pages
-		 * before telling its peer to transmit. No staging frames or verbs
-		 * data/credit packets may occupy these rings. */
+	if (tbv_dmabuf_verbs_enabled()) {
+		/* DMA-BUF verbs mode: RX is armed in imported GPU pages before
+		 * the peer transmits. No staging frames or verbs data/credit
+		 * packets may occupy these rings. */
 		path->tx_poll_enabled = false;
 		path->state = TBV_PATH_RING_ALLOCATED;
 		return 0;
@@ -2601,10 +2601,10 @@ void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)
 		}
 	}
 	if (rings_started) {
-		/* The exclusive GPU session drains its rings before dropping its
-		 * last rail reference. Preserve tunnel teardown without stopping
-		 * those already-stopped rings a second time. */
-		bool stopped = path->rail && READ_ONCE(path->rail->gpu_direct_used);
+		/* The DMA-BUF engine may already have stopped these rings after
+		 * a data error or for shutdown. Preserve tunnel teardown without
+		 * stopping them a second time. */
+		bool stopped = path->rail && READ_ONCE(path->rail->rings_stopped);
 
 		if (path->rx_ring && !stopped)
 			tb_ring_stop(path->rx_ring);

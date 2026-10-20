@@ -330,7 +330,6 @@ void tbv_peer_remove_rail(struct tbv_rail *rail)
 	 * verbs lifecycle and removes any chance of post_send racing
 	 * tbv_path_destroy.
 	 */
-	tbv_gpu_direct_disconnect(rail);
 	tbv_dmabuf_disconnect(rail);
 	tbv_ibdev_rail_event(peer->state, rail, false);
 

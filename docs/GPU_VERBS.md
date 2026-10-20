@@ -355,7 +355,7 @@ sudo insmod kernel/thunderbolt_ibverbs.ko \
   profile=linux_perf tbnet=prefer_rdma lanes=2 \
   bind_services=1 allocate_rings=1 start_rings=1 \
   negotiate_native=1 enable_tunnels=1 register_verbs=1 \
-  gpu_direct=0 dmabuf_verbs=1
+  dmabuf_verbs=1
 
 # Rank 0, danach Rank 1; Management-IP einsetzen:
 tbv_gpu_verbs --device usb4_rdma0 --gid-index 1 --iterations 8 --rounds 2 --remote-error

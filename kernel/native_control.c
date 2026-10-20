@@ -41,9 +41,6 @@ static u32 tbv_native_control_caps(const struct tbv_state *state,
 		caps |= TBV_NATIVE_WIRE_CAP_PUSH_DONE;
 	if (tbv_dmabuf_credits_enabled())
 		caps |= TBV_NATIVE_WIRE_CAP_DMABUF_CREDIT;
-	if (tbv_gpu_direct_enabled())
-		caps = TBV_NATIVE_WIRE_CAP_GPU_DIRECT | TBV_NATIVE_WIRE_CAP_MULTI_RAIL;
-
 	return caps;
 }
 
@@ -258,12 +255,10 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 	struct tbv_peer *peer;
 	int ret = -ENOENT;
 
-	if (!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) !=
-	    tbv_gpu_direct_enabled() ||
+	if ((remote->capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) ||
 	    !!(remote->capabilities & TBV_NATIVE_WIRE_CAP_DMABUF_VERBS) !=
 	    tbv_dmabuf_verbs_enabled() ||
-	    (tbv_dmabuf_verbs_enabled() && !remote->has_ids) ||
-	    (tbv_gpu_direct_enabled() && !remote->has_ids))
+	    (tbv_dmabuf_verbs_enabled() && !remote->has_ids))
 		return -EPROTONOSUPPORT;
 
 	mutex_lock(&state->lock);
@@ -335,8 +330,7 @@ static int tbv_native_control_mark_remote_ready(struct tbv_state *state,
 	struct tbv_peer *peer;
 	int ret = -ENOENT;
 
-	if (!!(remote->capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) !=
-	    tbv_gpu_direct_enabled() ||
+	if ((remote->capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) ||
 	    !!(remote->capabilities & TBV_NATIVE_WIRE_CAP_DMABUF_VERBS) !=
 	    tbv_dmabuf_verbs_enabled())
 		return -EPROTONOSUPPORT;
@@ -459,8 +453,7 @@ int tbv_native_control_handle_packet(struct tbv_state *state,
 	ret = tbv_native_wire_parse_hello(buf, size, &remote, &info);
 	if (ret)
 		return 0;
-	if (!!(remote.capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) !=
-	    tbv_gpu_direct_enabled() ||
+	if ((remote.capabilities & TBV_NATIVE_WIRE_CAP_GPU_DIRECT) ||
 	    !!(remote.capabilities & TBV_NATIVE_WIRE_CAP_DMABUF_VERBS) !=
 	    tbv_dmabuf_verbs_enabled())
 		return 1;

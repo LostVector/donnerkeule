@@ -59,7 +59,9 @@ enum tbv_native_wire_cap {
 	TBV_NATIVE_WIRE_CAP_UC = 1u << 0,
 	TBV_NATIVE_WIRE_CAP_RC = 1u << 1,
 	TBV_NATIVE_WIRE_CAP_MULTI_RAIL = 1u << 2,
-	/* Exclusive raw DMA-BUF pool mode, incompatible with verbs data. */
+	/* Retired exclusive raw DMA-BUF pool mode (gpu_direct=1). Never sent;
+	 * a peer that advertises it is an older module in that mode and is
+	 * rejected. Do not reuse the bit. */
 	TBV_NATIVE_WIRE_CAP_GPU_DIRECT = 1u << 3,
 	/* Verbs-owned descriptor transport and kernel USB4 rendezvous. */
 	TBV_NATIVE_WIRE_CAP_DMABUF_VERBS = 1u << 4,

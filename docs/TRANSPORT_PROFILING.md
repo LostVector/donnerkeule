@@ -82,17 +82,6 @@ enthalten. Optional erfasste IRQ-/Workqueue-Ereignisse helfen beim Trennen.
 Es gibt zwei Marker je Rail statt einer Trace-Aufzeichnung je 4-KiB-Frame.
 Nur während aktiver Detailmessung zählt ein zusätzlicher Atomic die Frames.
 
-Auch der ältere exklusive ioctl-Pfad in `gpu_direct.c`, den Gufos heutiger
-`donnerkeule`-Adapter verwendet, hat abschaltbare Messpunkte: `gpu_ioctl_lock`,
-`gpu_ioctl`, `gpu_submit`, `gpu_lane_post`, `gpu_dma_first`, `gpu_dma_last`,
-`gpu_batch_dma_done`, `gpu_wait` und `gpu_dma_watchdog`. `token` ist dort die
-Transfer-Sequenz, `wr_id` die lokale Session-Nummer (bei einem erst während
-der Session eingeschalteten Trace ggf. 0); QPs/PSN sind 0. RX/TX und Rails
-werden getrennt. Die Varianten dürfen nicht als dieselbe Implementierung
-gemittelt werden. Die Auswertung leitet entsprechend `gpu_post_to_first_callback`,
-`gpu_dma_callback_span` und `gpu_callback_resume` ab. TCP-Abstimmung und GPU-
-Kernels innerhalb des Gufo-Adapters brauchen weiterhin Anwendungs-Messpunkte.
-
 Im GPU-Test werden jede Iteration und die einzelnen Posting-/CQ-Aufrufe
 aufgezeichnet. Dazu kommen leere Polls, Spin-/Schlafaufrufe und Prozess-CPU-
 Mikrosekunden. GPU-Event-Paare messen RX-Vorlesen, Produzent, TX-/RX-Kopien

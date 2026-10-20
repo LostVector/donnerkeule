@@ -9,7 +9,7 @@
 let
   root = source;
   rootPrefix = "${toString root}/";
-  sourceEntries = [ "Makefile" "include" "kernel" "proto" ];
+  sourceEntries = [ "Makefile" "kernel" "proto" ];
 in
 stdenv.mkDerivation {
   pname = "thunderbolt-ibverbs";

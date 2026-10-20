@@ -112,11 +112,11 @@ Earlier [architecture checkpoint](docs/GPU_RDMA_STATUS_2026-10-04.md) is retaine
   preserves all four data rails. It is opt-in with `dmabuf_push_done=1` and
   passed the [16 October driver qualification](bench/results/2026-10-16-verbs-parity.md).
 
-- An opt-in [GPU-to-GPU DMA-BUF pool experiment](docs/GPU_DIRECT.md) places
-  HIP allocations directly in native NHI TX/RX descriptors and stripes them
-  across the rails. The experimental Gufo adapter now uses producer leases and
-  overlapped prefill; [model correctness and performance results](bench/results/2026-10-03-gufo-direct.md)
-  are retained. It is an exclusive message path; ordinary verbs remain the default.
+- An earlier exclusive GPU-to-GPU DMA-BUF pool transport (`gpu_direct=1`,
+  `/dev/tbv_gpu_direct`) was slower than verbs and has been removed; DMA-BUF
+  verbs (`dmabuf_verbs=1`) replaced it. Its
+  [model correctness and performance results](bench/results/2026-10-03-gufo-direct.md)
+  are retained.
 - Native Linux-to-Linux verbs transport is the main path.
 - Apple-compatible transport exists, but is still experimental.
 - The module builds against stock kernels, but needs Linux 6.14 or newer

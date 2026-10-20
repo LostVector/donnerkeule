@@ -10,7 +10,6 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 C_TESTS = {
     "verbs-dmabuf": [],
-    "gpu-pool": [],
     "proto": [],
     "reliability": ["proto/reliability.c"],
     "identity": ["proto/identity.c"],

@@ -153,20 +153,10 @@ static int __init tbv_init(void)
 
 	tbv_path_init_optional_symbols();
 	if (tbv_dmabuf_verbs_enabled() &&
-	    (tbv_gpu_direct_enabled() || !register_verbs ||
-	     !resolved.native_enabled || resolved.apple_enabled ||
+	    (!register_verbs || !resolved.native_enabled || resolved.apple_enabled ||
 	     !bind_services || !allocate_rings || !start_rings ||
 	     !negotiate_native || !enable_tunnels || !native_data)) {
 		pr_err("dmabuf_verbs requires native-only transport, all path setup options and register_verbs=1\n");
-		ret = -EINVAL;
-		goto err_path_symbols;
-	}
-
-	if (tbv_gpu_direct_enabled() &&
-	    (register_verbs || !resolved.native_enabled || resolved.apple_enabled ||
-	     !bind_services || !allocate_rings || !start_rings ||
-	     !negotiate_native || !enable_tunnels || !native_data)) {
-		pr_err("gpu_direct requires native-only transport, all path setup options and register_verbs=0\n");
 		ret = -EINVAL;
 		goto err_path_symbols;
 	}
@@ -253,15 +243,6 @@ static int __init tbv_init(void)
 		snprintf(lanes_desc, sizeof(lanes_desc), "%u-%u",
 			 cfg.lanes_min, cfg.lanes_max);
 
-	ret = tbv_gpu_direct_start(&tbv_driver_state);
-	if (ret) {
-		tbv_ibdev_stop(&tbv_driver_state);
-		tbv_services_stop(&tbv_driver_state);
-		tbv_dmabuf_stop();
-		tbv_core_exit(&tbv_driver_state);
-		goto err_path_symbols;
-	}
-
 	pr_info("loaded compat=%s profile=%s resolved_profile=%s tbnet=%s tbnet_identity=%s tbnet_identity_minimal_e2e=%u tbnet_identity_minimal_apple_only=%u lanes=%s native_control=%s native_data=%u apple_data=%u native_fragment_striping=%u\n",
 		tbv_compat_name(cfg.compat),
 		tbv_profile_name(cfg.profile),
@@ -285,7 +266,6 @@ err_path_symbols:
 
 static void __exit tbv_exit(void)
 {
-	tbv_gpu_direct_stop();
 	tbv_ibdev_stop(&tbv_driver_state);
 	tbv_services_stop(&tbv_driver_state);
 	tbv_dmabuf_stop();

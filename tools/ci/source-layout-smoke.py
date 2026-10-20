@@ -10,7 +10,7 @@ module = (ROOT / "nix/module.nix").read_text()
 entries = re.search(r"sourceEntries = \[([^]]+)\]", module)
 assert entries, "Missing module source entry list"
 included = set(re.findall(r'"([^"]+)"', entries[1]))
-for directory in ("kernel", "proto", "include"):
+for directory in ("kernel", "proto"):
     assert directory in included, f"Module source omits {directory}"
     for source in (ROOT / directory).rglob("*"):
         if source.suffix not in (".c", ".h"):

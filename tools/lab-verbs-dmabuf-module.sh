@@ -52,9 +52,9 @@ load)
     test -f "$lab/test-signed.ko"
     idle
     mapfile -t params < "$lab/baseline.parameters"
-    extra=(gpu_direct=0 dmabuf_verbs=0)
+    extra=(dmabuf_verbs=0)
     if [[ $mode = dmabuf ]]; then
-        extra=(gpu_direct=0 dmabuf_verbs=1 register_verbs=1)
+        extra=(dmabuf_verbs=1 register_verbs=1)
     fi
     index=${TBV_LAB_INDEX:-1}
     profile=${TBV_LAB_PROFILE:-0}

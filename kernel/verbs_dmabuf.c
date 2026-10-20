@@ -552,8 +552,8 @@ out:
 static void tbv_dmabuf_stop_rail(struct tbv_rail *rail)
 {
 	mutex_lock(&dmabuf_engine.ring_lock);
-	if (!READ_ONCE(rail->gpu_direct_used)) {
-		WRITE_ONCE(rail->gpu_direct_used, true);
+	if (!READ_ONCE(rail->rings_stopped)) {
+		WRITE_ONCE(rail->rings_stopped, true);
 		tb_ring_stop(rail->path.tx_ring);
 		tb_ring_stop(rail->path.rx_ring);
 		pr_warn_ratelimited("rail %#x stopped after a data error or abort; recreate the connection to use it again\n",
@@ -563,7 +563,7 @@ static void tbv_dmabuf_stop_rail(struct tbv_rail *rail)
 }
 
 /* Reboot/poweroff: stop the rail's data rings before the NHI's own shutdown
- * removes the domain. Reuses the gpu_direct_used marker, so tbv_path_destroy()
+ * removes the domain. Sets the rings_stopped marker, so tbv_path_destroy()
  * does not stop them a second time (tb_ring_stop() warns on a stopped ring).
  * Bounded: a batch holding ring_lock must not be able to stall shutdown. */
 int tbv_dmabuf_quiesce_rail(struct tbv_rail *rail)
@@ -579,8 +579,8 @@ int tbv_dmabuf_quiesce_rail(struct tbv_rail *rail)
 			return -EBUSY;
 		msleep(1);
 	}
-	if (!READ_ONCE(rail->gpu_direct_used)) {
-		WRITE_ONCE(rail->gpu_direct_used, true);
+	if (!READ_ONCE(rail->rings_stopped)) {
+		WRITE_ONCE(rail->rings_stopped, true);
 		tb_ring_stop(rail->path.tx_ring);
 		tb_ring_stop(rail->path.rx_ring);
 	}
@@ -640,7 +640,7 @@ void tbv_dmabuf_cancel(void *context)
 static bool tbv_dmabuf_rail_ready(struct tbv_rail *rail)
 {
 	return rail->peer->backend == TBV_BACKEND_NATIVE &&
-		!READ_ONCE(rail->removing) && !READ_ONCE(rail->gpu_direct_used) &&
+		!READ_ONCE(rail->removing) && !READ_ONCE(rail->rings_stopped) &&
 		rail->peer->remote_host_known && tbv_rail_data_ready(rail) &&
 		(!tbv_control_required(rail->peer) || tbv_control_ready(rail->peer));
 }
@@ -941,7 +941,7 @@ static void tbv_dmabuf_batch_kick(struct tbv_dmabuf_batch *batch, bool tx)
 		struct tb_ring *ring = tx ? rail->path.tx_ring : rail->path.rx_ring;
 
 		mutex_lock(&dmabuf_engine.ring_lock);
-		if (!READ_ONCE(rail->gpu_direct_used))
+		if (!READ_ONCE(rail->rings_stopped))
 			schedule_work(&ring->work);
 		mutex_unlock(&dmabuf_engine.ring_lock);
 	}

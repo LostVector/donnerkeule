@@ -117,10 +117,6 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   state->native_fragment_striping);
 	seq_printf(s, "native_write_striping: %u\n",
 		   state->native_write_striping);
-	seq_printf(s, "gpu_direct: %u\n", tbv_gpu_direct_enabled());
-	seq_printf(s, "gpu_direct_work_kicks: %llu\n", tbv_gpu_direct_work_kicks());
-	seq_printf(s, "gpu_direct_wait_after_kick: %llu\n",
-		   tbv_gpu_direct_wait_after_kick());
 	tbv_dmabuf_debugfs_show(s);
 	seq_printf(s, "native_write_stripe_min_bytes: %u\n",
 		   state->native_write_stripe_min_bytes);
@@ -456,7 +452,7 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 				   rail->remote_transmit_path,
 				   rail->remote_tx_hop,
 				   rail->remote_rx_hop,
-				   READ_ONCE(rail->gpu_direct_used));
+				   READ_ONCE(rail->rings_stopped));
 			seq_printf(s,
 				   "    data_tx_enqueued=%lld data_tx_posted=%lld data_tx_completed=%lld data_tx_credit_stalls=%lld data_tx_credit_received=%lld tx_credits=%u/%u\n",
 				   atomic64_read(&rail->path.data_tx_enqueued),

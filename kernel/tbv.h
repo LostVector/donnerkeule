@@ -293,8 +293,9 @@ struct tbv_rail {
 	u32 native_lane;
 	bool active;
 	bool removing;
-	/* Direct raw pools cannot be reused after close or a failed session. */
-	bool gpu_direct_used;
+	/* The DMA-BUF engine stopped the data rings (data error, abort or
+	 * shutdown); they stay stopped until the connection is recreated. */
+	bool rings_stopped;
 	/*
 	 * Registration unwinding marker. Set under state->rail_register_lock
 	 * when ib_register_device() returns nonzero for this rail. While true
@@ -879,13 +880,6 @@ int tbv_core_init(struct tbv_state *state,
 		  const struct tbv_resolved_config *cfg,
 		  const struct tbv_tbnet_identity_config *identity_cfg);
 void tbv_core_exit(struct tbv_state *state);
-
-bool tbv_gpu_direct_enabled(void);
-u64 tbv_gpu_direct_work_kicks(void);
-u64 tbv_gpu_direct_wait_after_kick(void);
-int tbv_gpu_direct_start(struct tbv_state *state);
-void tbv_gpu_direct_stop(void);
-void tbv_gpu_direct_disconnect(struct tbv_rail *rail);
 
 #include "verbs_dmabuf.h"
 
