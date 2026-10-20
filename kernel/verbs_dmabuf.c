@@ -2553,3 +2553,6 @@ void tbv_dmabuf_stop(void)
 	destroy_workqueue(dmabuf_engine.post_wq);
 	dmabuf_engine.post_wq = NULL;
 }
+
+/* The DMA-BUF attachment API used for imported GPU memory. */
+MODULE_IMPORT_NS("DMA_BUF");
