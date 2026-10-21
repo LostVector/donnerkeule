@@ -41,6 +41,7 @@ int tbv_dmabuf_submit(struct tbv_state *state, struct tbv_rail *rail,
 		       const struct tbv_native_data_header *hdr,
 		       const struct tbv_dmabuf_buffer *buffer, u8 retries,
 		       u8 rnr_retries, unsigned long timeout);
+bool tbv_dmabuf_rail_ready(struct tbv_rail *rail);
 
 int tbv_ibdev_dmabuf_begin(struct tbv_state *state, struct tbv_rail *rail,
 			    const struct tbv_native_data_header *hdr,

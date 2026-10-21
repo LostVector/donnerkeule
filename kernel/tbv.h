@@ -296,6 +296,9 @@ struct tbv_rail {
 	/* The DMA-BUF engine stopped the data rings (data error, abort or
 	 * shutdown); they stay stopped until the connection is recreated. */
 	bool rings_stopped;
+	/* Why the rings were stopped: 1 abort/data error, 2 interrupted batch. */
+	int dmabuf_quarantine_reason;
+	struct tbv_dmabuf_cache *dmabuf_cache[2];
 	/*
 	 * Registration unwinding marker. Set under state->rail_register_lock
 	 * when ib_register_device() returns nonzero for this rail. While true

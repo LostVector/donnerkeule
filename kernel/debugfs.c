@@ -6,6 +6,7 @@
 
 #include "../proto/native_wire.h"
 #include "tbv.h"
+#include "verbs_dmabuf.h"
 #include "verbs_control.h"
 
 static u32 tbv_debugfs_wire_path_flags(const struct tbv_path *path)
@@ -453,6 +454,9 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 				   rail->remote_tx_hop,
 				   rail->remote_rx_hop,
 				   READ_ONCE(rail->rings_stopped));
+			seq_printf(s, "    descriptor_ready=%u quarantine_reason=%d\n",
+				   tbv_dmabuf_rail_ready(rail),
+				   READ_ONCE(rail->dmabuf_quarantine_reason));
 			seq_printf(s,
 				   "    data_tx_enqueued=%lld data_tx_posted=%lld data_tx_completed=%lld data_tx_credit_stalls=%lld data_tx_credit_received=%lld tx_credits=%u/%u\n",
 				   atomic64_read(&rail->path.data_tx_enqueued),

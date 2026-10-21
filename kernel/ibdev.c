@@ -411,6 +411,7 @@ struct tbv_qp {
 	 */
 	struct mutex ack_lock;
 	struct mutex post_lock;
+	bool dmabuf_draining;
 	wait_queue_head_t credit_wait;
 	wait_queue_head_t apple_tx_wait;
 	wait_queue_head_t refs_wait;
@@ -1848,7 +1849,8 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 		u32 pending;
 		u32 rr_distance;
 
-		if (!tbv_rail_data_ready(rail) || rail->removing)
+		if (!tbv_rail_data_ready(rail) || rail->removing ||
+		    (tbv_dmabuf_verbs_enabled() && !tbv_dmabuf_rail_ready(rail)))
 			continue;
 		if (!READ_ONCE(rail->ibdev))
 			continue;
@@ -2677,6 +2679,40 @@ err_put_rail:
 	return ret;
 }
 
+/* Timed tools can destroy a QP with a full SQ. A healthy close first drains
+ * accepted work, leaving incoming requests alive until the peer becomes quiet.
+ * The raw-frame cancellation path still quarantines a truly interrupted DMA.
+ * New local posts are serialized out; existing callbacks retain their refs. */
+static void tbv_dmabuf_drain_qp(struct tbv_qp *tqp)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(2000), quiet = 0;
+	u64 start = tbv_perf_clock();
+	struct tbv_perf_id perf = { .src_qp = tqp->base.qp_num };
+	int ret = -ETIMEDOUT;
+
+	if (!tbv_dmabuf_verbs_enabled())
+		return;
+	mutex_lock(&tqp->post_lock);
+	WRITE_ONCE(tqp->dmabuf_draining, true);
+	mutex_unlock(&tqp->post_lock);
+	while (time_before(jiffies, deadline)) {
+		if (READ_ONCE(tqp->state) == IB_QPS_ERR || READ_ONCE(tqp->closing))
+			break;
+		if (!READ_ONCE(tqp->sendq_count) && refcount_read(&tqp->refs) == 1) {
+			if (!quiet)
+				quiet = jiffies + msecs_to_jiffies(100);
+			if (time_after_eq(jiffies, quiet)) {
+				ret = 0;
+				break;
+			}
+		} else {
+			quiet = 0;
+		}
+		msleep(5);
+	}
+	tbv_perf_span(&perf, "qp_drain", start, ret, READ_ONCE(tqp->sendq_count));
+}
+
 static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
 {
 	struct tbv_qp *tqp = container_of(qp, struct tbv_qp, base);
@@ -2685,6 +2721,7 @@ static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
 	u32 pending;
 	u32 i;
 
+	tbv_dmabuf_drain_qp(tqp);
 	spin_lock_irqsave(&tqp->lock, flags);
 	tqp->closing = true;
 	spin_unlock_irqrestore(&tqp->lock, flags);
@@ -5466,7 +5503,7 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 	bool write_with_imm = wr->opcode == IB_WR_RDMA_WRITE_WITH_IMM;
 	int ret;
 
-	if (!tbv_qp_allows_post(tqp))
+	if (READ_ONCE(tqp->dmabuf_draining) || !tbv_qp_allows_post(tqp))
 		return -EINVAL;
 
 	if (tqp->type == IB_QPT_GSI)
