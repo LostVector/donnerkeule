@@ -23,6 +23,7 @@
 
 #include "tbv.h"
 #include "verbs_dmabuf.h"
+#include "verbs_internal.h"
 #include "verbs_control.h"
 #include "perf.h"
 
@@ -66,6 +67,7 @@ module_param(dmabuf_reuse_buffers, bool, 0444);
 MODULE_PARM_DESC(dmabuf_reuse_buffers,
 	"Cache one drained descriptor/staging batch per rail and direction (opt-in)");
 static atomic64_t dmabuf_cache_hits, dmabuf_cache_misses, dmabuf_cache_bytes;
+static atomic64_t dmabuf_host_tx_frames, dmabuf_host_rx_frames;
 
 static bool dmabuf_profile;
 module_param(dmabuf_profile, bool, 0444);
@@ -179,6 +181,8 @@ void tbv_dmabuf_debugfs_show(struct seq_file *s)
 	seq_printf(s, "dmabuf_cache_hits: %lld\n", atomic64_read(&dmabuf_cache_hits));
 	seq_printf(s, "dmabuf_cache_misses: %lld\n", atomic64_read(&dmabuf_cache_misses));
 	seq_printf(s, "dmabuf_cache_bytes: %lld\n", atomic64_read(&dmabuf_cache_bytes));
+	seq_printf(s, "dmabuf_host_tx_frames: %lld\n", atomic64_read(&dmabuf_host_tx_frames));
+	seq_printf(s, "dmabuf_host_rx_frames: %lld\n", atomic64_read(&dmabuf_host_rx_frames));
 	seq_printf(s, "dmabuf_coalesce_copy: %u\n", dmabuf_coalesce_copy);
 	seq_printf(s, "dmabuf_copy_chunks: %lld\n", atomic64_read(&dmabuf_copy_chunks));
 	seq_printf(s, "dmabuf_copy_bytes: %lld\n", atomic64_read(&dmabuf_copy_bytes));
@@ -250,6 +254,7 @@ struct tbv_dmabuf_cache {
 struct tbv_dmabuf_lane {
 	struct tbv_rail *rail;
 	struct tbv_dmabuf_cache *cache;
+	struct tbv_host_dma_map *host_map;
 	struct tbv_dmabuf_frame *frames;
 	struct device *dev;
 	void *staging;
@@ -778,6 +783,8 @@ static void tbv_dmabuf_batch_drop(struct tbv_dmabuf_batch *batch, bool abort)
 				flush_work(&ring->work);
 			}
 		}
+		if (lane->host_map)
+			dma_sync_sgtable_for_cpu(lane->dev, &lane->host_map->sgt, DMA_BIDIRECTIONAL);
 		if (lane->cache)
 			tbv_dmabuf_cache_put(lane, abort, batch->tx);
 		else if (lane->staging)
@@ -914,9 +921,19 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 			return -ENODEV;
 		if (!lane->count)
 			continue;
+		if (buffer->host_mr) {
+			lane->host_map = tbv_host_dma_map(buffer->host_mr, lane->dev);
+			if (IS_ERR(lane->host_map)) {
+				int ret = PTR_ERR(lane->host_map);
+
+				lane->host_map = NULL;
+				return ret;
+			}
+			dma_sync_sgtable_for_device(lane->dev, &lane->host_map->sgt, DMA_BIDIRECTIONAL);
+		}
 		perf_start = tbv_perf_clock();
 		if (dmabuf_reuse_buffers) {
-			int ret = tbv_dmabuf_cache_get(lane, tx, !buffer->mr);
+			int ret = tbv_dmabuf_cache_get(lane, tx, !buffer->mr && !buffer->host_mr);
 
 			if (ret)
 				return ret;
@@ -925,7 +942,7 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 			if (!lane->frames)
 				return -ENOMEM;
 		}
-		if (!buffer->mr && !lane->cache) {
+		if (!buffer->mr && !buffer->host_mr && !lane->cache) {
 			lane->staging_bytes = lane->count * TBV_DMABUF_FRAME_BYTES;
 			lane->staging = dma_alloc_coherent(lane->dev, lane->staging_bytes,
 							   &lane->staging_dma, GFP_KERNEL);
@@ -957,6 +974,12 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 					&f->frame.buffer_phy);
 				if (ret)
 					return ret;
+			} else if (buffer->host_mr) {
+				ret = tbv_host_dma_address(buffer->host_mr, lane->host_map,
+					buffer->offset + m->offset + offset,
+					TBV_DMABUF_FRAME_BYTES, &f->frame.buffer_phy);
+				if (ret)
+					return ret;
 			} else {
 				f->frame.buffer_phy = lane->staging_dma +
 					n * TBV_DMABUF_FRAME_BYTES;
@@ -971,7 +994,7 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 		}
 	/* The lane covers a contiguous, validated slice of the same WR.
 	 * Copy only its payload, retaining the existing per-MR bounds checks. */
-	if (tx && !buffer->mr && dmabuf_coalesce_copy) {
+	if (tx && !buffer->mr && !buffer->host_mr && dmabuf_coalesce_copy) {
 		u32 offset = lane->first * TBV_DMABUF_FRAME_BYTES;
 		u32 bytes = min_t(u32, lane->staging_bytes, m->bytes - offset);
 		int ret = buffer->copy(buffer->context, m->offset + offset,
@@ -983,6 +1006,8 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 		atomic64_add(bytes, &dmabuf_copy_bytes);
 	}
 		tbv_perf_span(&lane->perf, "lane_build", perf_start, 0, lane->count);
+		if (buffer->host_mr)
+			atomic64_add(lane->count, tx ? &dmabuf_host_tx_frames : &dmabuf_host_rx_frames);
 	}
 	return 0;
 }
@@ -1523,7 +1548,7 @@ static int tbv_dmabuf_rx_reap_impl(void)
 	ret = rx->deferred;
 	if (ret)
 		goto fail;
-	if (!rx->buffer.mr) {
+	if (!rx->buffer.mr && !rx->buffer.host_mr) {
 		for (i = 0; i < rx->batch.count; i++) {
 			struct tbv_dmabuf_lane *lane = &rx->batch.lanes[i];
 			u32 offset = lane->first * TBV_DMABUF_FRAME_BYTES;

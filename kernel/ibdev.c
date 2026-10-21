@@ -9681,6 +9681,10 @@ static int tbv_dmabuf_post_send(struct tbv_send_ctx *ctx)
 		buffer.mr = ctx->segs[0].mr->dmabuf;
 		buffer.offset = ctx->segs[0].addr - ctx->segs[0].mr->start;
 		atomic64_inc(&ctx->tqp->owner->data_wr_zcopy);
+	} else if (ctx->nsegs == 1 && tbv_host_dma_eligible(ctx->segs[0].mr,
+		   ctx->segs[0].addr - ctx->segs[0].mr->start, ctx->total_len)) {
+		buffer.host_mr = ctx->segs[0].mr;
+		buffer.offset = ctx->segs[0].addr - ctx->segs[0].mr->start;
 	} else {
 		atomic64_inc(&ctx->tqp->owner->data_wr_copied);
 	}
@@ -9846,6 +9850,8 @@ int tbv_ibdev_dmabuf_begin(struct tbv_state *state, struct tbv_rail *rail,
 		.alive = tbv_dmabuf_recv_alive,
 		.finish = tbv_dmabuf_recv_finish,
 	};
+	if (tbv_host_dma_eligible(ctx->mr, buffer->offset, hdr->length))
+		buffer->host_mr = ctx->mr;
 	mutex_unlock(&tqp->rx_lock);
 	return 0;
 fail:

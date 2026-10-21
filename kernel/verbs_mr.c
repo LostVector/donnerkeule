@@ -5,11 +5,150 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/module.h>
+#include <linux/dma-mapping.h>
+#include <linux/seq_file.h>
+#include <linux/sizes.h>
 #include "../proto/native_data.h"
 #include "tbv.h"
 #include "verbs_internal.h"
 
 static atomic_t tbv_mr_key = ATOMIC_INIT(1);
+static bool dmabuf_host_direct;
+static atomic64_t host_dma_maps, host_dma_active;
+module_param(dmabuf_host_direct, bool, 0444);
+MODULE_PARM_DESC(dmabuf_host_direct,
+	"Map aligned ordinary host MRs directly to NHI descriptors; unaligned/tail WRs keep staging");
+
+void tbv_host_dma_debugfs_show(struct seq_file *s)
+{
+	seq_printf(s, "dmabuf_host_direct: %u\n", dmabuf_host_direct);
+	seq_printf(s, "dmabuf_host_maps: %lld\n", atomic64_read(&host_dma_maps));
+	seq_printf(s, "dmabuf_host_active_maps: %lld\n", atomic64_read(&host_dma_active));
+}
+
+bool tbv_host_dma_eligible(struct tbv_mr *mr, u64 offset, u64 length)
+{
+	return dmabuf_host_direct && PAGE_SIZE == SZ_4K && mr && mr->umem &&
+		!mr->dma_mr && !mr->dmabuf && mr->pages &&
+		mr->length <= SZ_256M && PAGE_ALIGNED(mr->start) &&
+		mr->npages == DIV_ROUND_UP(mr->length, PAGE_SIZE) &&
+		PAGE_ALIGNED(offset) && length >= SZ_64K && PAGE_ALIGNED(length) &&
+		offset <= mr->length && length <= mr->length - offset;
+}
+
+/* Each map belongs to this MR and the actual DMA device. The verbs job's MR
+ * reference outlives all descriptor callbacks; no map is reused across MRs. */
+struct tbv_host_dma_map *tbv_host_dma_map(struct tbv_mr *mr, struct device *dev)
+{
+	struct tbv_host_dma_map *map = NULL;
+	struct scatterlist *sg;
+	unsigned long page = 0;
+	unsigned int i;
+	int ret;
+
+	mutex_lock(&mr->host_dma_lock);
+	for (i = 0; i < ARRAY_SIZE(mr->host_dma); i++) {
+		if (mr->host_dma[i].dev == dev) {
+			map = &mr->host_dma[i];
+			goto out;
+		}
+	}
+	for (i = 0; i < ARRAY_SIZE(mr->host_dma); i++)
+		if (!mr->host_dma[i].dev) {
+			map = &mr->host_dma[i];
+			break;
+		}
+	if (!map) {
+		ret = -ENOSPC;
+		goto fail;
+	}
+	ret = sg_alloc_table_from_pages(&map->sgt, mr->pages, mr->npages, 0,
+				      mr->npages * PAGE_SIZE, GFP_KERNEL);
+	if (ret) {
+		memset(map, 0, sizeof(*map));
+		goto fail;
+	}
+	ret = dma_map_sgtable(dev, &map->sgt, DMA_BIDIRECTIONAL, 0);
+	if (ret)
+		goto free_sg;
+	map->pages = kvmalloc_array(mr->npages, sizeof(*map->pages), GFP_KERNEL);
+	if (!map->pages) {
+		ret = -ENOMEM;
+		goto unmap;
+	}
+	for_each_sgtable_dma_sg(&map->sgt, sg, i) {
+		u64 address = sg_dma_address(sg);
+		u32 length = sg_dma_len(sg);
+
+		if (!PAGE_ALIGNED(address) || !PAGE_ALIGNED(length) ||
+		    (length && address > ~(dma_addr_t)0 - (length - 1))) {
+			ret = -EFAULT;
+			goto free_pages;
+		}
+		while (length) {
+			if (page >= mr->npages || address > ~(dma_addr_t)0 - (PAGE_SIZE - 1)) {
+				ret = -EFAULT;
+				goto free_pages;
+			}
+			map->pages[page++] = address;
+			address += PAGE_SIZE;
+			length -= PAGE_SIZE;
+		}
+	}
+	if (page != mr->npages) {
+		ret = -EFAULT;
+		goto free_pages;
+	}
+	map->npages = page;
+	map->dev = get_device(dev);
+	atomic64_inc(&host_dma_maps);
+	atomic64_inc(&host_dma_active);
+	goto out;
+free_pages:
+	kvfree(map->pages);
+unmap:
+	dma_unmap_sgtable(dev, &map->sgt, DMA_BIDIRECTIONAL, 0);
+free_sg:
+	sg_free_table(&map->sgt);
+	memset(map, 0, sizeof(*map));
+fail:
+	map = ERR_PTR(ret);
+out:
+	mutex_unlock(&mr->host_dma_lock);
+	return map;
+}
+
+int tbv_host_dma_address(struct tbv_mr *mr, struct tbv_host_dma_map *map,
+			 u64 offset, u32 bytes, dma_addr_t *address)
+{
+	unsigned long page = offset / PAGE_SIZE;
+
+	if (!bytes || bytes > PAGE_SIZE || !PAGE_ALIGNED(offset) ||
+	    offset >= mr->length || bytes > mr->length - offset || page >= map->npages)
+		return -EFAULT;
+	*address = map->pages[page];
+	return 0;
+}
+
+static void tbv_host_dma_release(struct tbv_mr *mr)
+{
+	u32 i;
+
+	for (i = 0; i < ARRAY_SIZE(mr->host_dma); i++) {
+		struct tbv_host_dma_map *map = &mr->host_dma[i];
+
+		if (!map->dev)
+			continue;
+		dma_unmap_sgtable(map->dev, &map->sgt, DMA_BIDIRECTIONAL, 0);
+		sg_free_table(&map->sgt);
+		kvfree(map->pages);
+		put_device(map->dev);
+		atomic64_dec(&host_dma_active);
+		memset(map, 0, sizeof(*map));
+	}
+	mutex_destroy(&mr->host_dma_lock);
+}
 
 struct tbv_mr *tbv_mr_get(struct tbv_state *state, u32 key)
 {
@@ -29,6 +168,7 @@ out:
 
 static void tbv_mr_free(struct tbv_mr *mr)
 {
+	tbv_host_dma_release(mr);
 	tbv_dmabuf_release(mr->dmabuf);
 	kvfree(mr->pages);
 	if (mr->umem)
@@ -306,6 +446,7 @@ static int tbv_mr_publish(struct tbv_mr *mr, struct ib_pd *pd)
 	mr->base.lkey = key;
 	mr->base.rkey = key;
 	mr->owner = owner;
+	mutex_init(&mr->host_dma_lock);
 	refcount_set(&mr->refs, 1);
 	INIT_WORK(&mr->free_work, tbv_mr_free_work);
 

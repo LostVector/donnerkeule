@@ -5,11 +5,13 @@
 #include "../proto/verbs_dmabuf.h"
 
 struct tbv_dmabuf_mr;
+struct tbv_mr;
 struct seq_file;
 
 /* The verbs layer holds QP/MR references until finish, including failures. */
 struct tbv_dmabuf_buffer {
 	struct tbv_dmabuf_mr *mr;
+	struct tbv_mr *host_mr;
 	u64 offset;
 	u64 wr_id; /* Local profiling correlation only; never added to the wire. */
 	void *owner;
