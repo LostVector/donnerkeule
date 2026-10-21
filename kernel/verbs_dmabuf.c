@@ -342,6 +342,8 @@ struct tbv_dmabuf_engine {
 	struct hrtimer progress_timer;
 	struct work_struct progress_work;
 	atomic_t progress_batches;
+	spinlock_t progress_lock;
+	bool progress_running;
 	bool progress_stopping;
 	struct mutex rx_lock, ring_lock, tx_lock;
 	/* Orders submissions with direct posting: queued or running TX jobs. */
@@ -376,6 +378,7 @@ static struct tbv_dmabuf_engine dmabuf_engine = {
 	.submit_lock = __MUTEX_INITIALIZER(dmabuf_engine.submit_lock),
 	.tx_jobs = ATOMIC_INIT(0),
 	.progress_batches = ATOMIC_INIT(0),
+	.progress_lock = __SPIN_LOCK_UNLOCKED(dmabuf_engine.progress_lock),
 	.token = ATOMIC64_INIT(0),
 	.rx_wait = __WAIT_QUEUE_HEAD_INITIALIZER(dmabuf_engine.rx_wait),
 	.credit_lock = __SPIN_LOCK_UNLOCKED(dmabuf_engine.credit_lock),
@@ -1053,13 +1056,43 @@ static bool tbv_dmabuf_progress_active(void)
 		 atomic_read(&dmabuf_engine.state->verbs_qps));
 }
 
-void tbv_dmabuf_progress_arm(void)
+/* A running callback alone owns forwarding/restarting. Repeated submissions
+ * must neither re-enqueue that callback nor postpone its progress deadline. */
+static void tbv_dmabuf_progress_start(void)
 {
-	if (dmabuf_verbs && dmabuf_poll_us && dmabuf_poll_control &&
-	    !READ_ONCE(dmabuf_engine.progress_stopping))
+	unsigned long flags;
+
+	if (!dmabuf_verbs || !dmabuf_poll_us)
+		return;
+	spin_lock_irqsave(&dmabuf_engine.progress_lock, flags);
+	if (!dmabuf_engine.progress_stopping && !dmabuf_engine.progress_running) {
+		dmabuf_engine.progress_running = true;
 		hrtimer_start(&dmabuf_engine.progress_timer,
 			ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC),
 			HRTIMER_MODE_REL);
+	}
+	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
+}
+
+void tbv_dmabuf_progress_arm(void)
+{
+	if (dmabuf_poll_control)
+		tbv_dmabuf_progress_start();
+}
+
+/* Never wait for a callback while holding the lock that callback acquires. */
+static void tbv_dmabuf_progress_stop(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dmabuf_engine.progress_lock, flags);
+	dmabuf_engine.progress_stopping = true;
+	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
+	hrtimer_cancel(&dmabuf_engine.progress_timer);
+	cancel_work_sync(&dmabuf_engine.progress_work);
+	spin_lock_irqsave(&dmabuf_engine.progress_lock, flags);
+	dmabuf_engine.progress_running = false;
+	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
 }
 
 /* Hop zero belongs to the kernel XDomain control channel. Its ring pointers
@@ -1112,12 +1145,19 @@ static void tbv_dmabuf_progress_work(struct work_struct *work)
 
 static enum hrtimer_restart tbv_dmabuf_progress_timer(struct hrtimer *timer)
 {
-	if (READ_ONCE(dmabuf_engine.progress_stopping) ||
-	    !tbv_dmabuf_progress_active())
-		return HRTIMER_NORESTART;
-	queue_work(dmabuf_engine.progress_wq, &dmabuf_engine.progress_work);
-	hrtimer_forward_now(timer, ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC));
-	return HRTIMER_RESTART;
+	unsigned long flags;
+	enum hrtimer_restart restart = HRTIMER_NORESTART;
+
+	spin_lock_irqsave(&dmabuf_engine.progress_lock, flags);
+	if (dmabuf_engine.progress_stopping || !tbv_dmabuf_progress_active()) {
+		dmabuf_engine.progress_running = false;
+	} else {
+		queue_work(dmabuf_engine.progress_wq, &dmabuf_engine.progress_work);
+		hrtimer_forward_now(timer, ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC));
+		restart = HRTIMER_RESTART;
+	}
+	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
+	return restart;
 }
 
 static int tbv_dmabuf_batch_post(struct tbv_dmabuf_batch *batch, bool tx)
@@ -1147,10 +1187,7 @@ static int tbv_dmabuf_batch_post(struct tbv_dmabuf_batch *batch, bool tx)
 		batch->submitted = true;
 		if (dmabuf_poll_us) {
 			atomic_inc(&dmabuf_engine.progress_batches);
-			if (!READ_ONCE(dmabuf_engine.progress_stopping))
-				hrtimer_start(&dmabuf_engine.progress_timer,
-					ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC),
-					HRTIMER_MODE_REL);
+			tbv_dmabuf_progress_start();
 		}
 	}
 	if (!dmabuf_parallel_post || groups < 2 || frames < 128) {
@@ -2778,6 +2815,7 @@ int tbv_dmabuf_start(struct tbv_state *state)
 		return -ENOMEM;
 	}
 	atomic_set(&dmabuf_engine.progress_batches, 0);
+	dmabuf_engine.progress_running = false;
 	WRITE_ONCE(dmabuf_engine.progress_stopping, false);
 	INIT_WORK(&dmabuf_engine.progress_work, tbv_dmabuf_progress_work);
 	hrtimer_setup(&dmabuf_engine.progress_timer, tbv_dmabuf_progress_timer,
@@ -2809,9 +2847,7 @@ void tbv_dmabuf_stop(void)
 {
 	if (!dmabuf_engine.tx_wq)
 		return;
-	WRITE_ONCE(dmabuf_engine.progress_stopping, true);
-	hrtimer_cancel(&dmabuf_engine.progress_timer);
-	cancel_work_sync(&dmabuf_engine.progress_work);
+	tbv_dmabuf_progress_stop();
 	cancel_delayed_work_sync(&dmabuf_engine.rx_watchdog);
 	cancel_work_sync(&dmabuf_engine.credit_work);
 	mutex_lock(&dmabuf_engine.rx_lock);
