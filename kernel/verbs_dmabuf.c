@@ -8,6 +8,7 @@
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
+#include <linux/hrtimer.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
 #include <linux/seq_file.h>
@@ -30,6 +31,18 @@ MODULE_PARM_DESC(dmabuf_verbs,
 static bool dmabuf_index = true;
 module_param(dmabuf_index, bool, 0444);
 MODULE_PARM_DESC(dmabuf_index, "Index DMA-BUF frame addresses once per NHI attachment");
+
+/* Optional bounded progress for NHIs whose completion IRQ can be missed.
+ * Use the ordinary serialized ring worker; never consume descriptors here. */
+static uint dmabuf_poll_us;
+module_param(dmabuf_poll_us, uint, 0444);
+MODULE_PARM_DESC(dmabuf_poll_us,
+	"Descriptor ring progress interval in microseconds; 0 keeps IRQ/10ms watchdog behavior");
+
+static bool dmabuf_poll_control;
+module_param(dmabuf_poll_control, bool, 0444);
+MODULE_PARM_DESC(dmabuf_poll_control,
+	"Also progress existing XDomain control rings while a verbs QP exists; requires dmabuf_poll_us");
 
 static bool dmabuf_profile;
 module_param(dmabuf_profile, bool, 0444);
@@ -299,7 +312,11 @@ struct tbv_dmabuf_credit {
 /* One ordered TX stream and one RX transaction span all rails/links.
  * ring_lock serializes ring replacement; tx_lock protects cancellation. */
 struct tbv_dmabuf_engine {
-	struct workqueue_struct *tx_wq, *post_wq;
+	struct workqueue_struct *tx_wq, *post_wq, *progress_wq;
+	struct hrtimer progress_timer;
+	struct work_struct progress_work;
+	atomic_t progress_batches;
+	bool progress_stopping;
 	struct mutex rx_lock, ring_lock, tx_lock;
 	/* Orders submissions with direct posting: queued or running TX jobs. */
 	struct mutex submit_lock;
@@ -332,6 +349,7 @@ static struct tbv_dmabuf_engine dmabuf_engine = {
 	.tx_lock = __MUTEX_INITIALIZER(dmabuf_engine.tx_lock),
 	.submit_lock = __MUTEX_INITIALIZER(dmabuf_engine.submit_lock),
 	.tx_jobs = ATOMIC_INIT(0),
+	.progress_batches = ATOMIC_INIT(0),
 	.token = ATOMIC64_INIT(0),
 	.rx_wait = __WAIT_QUEUE_HEAD_INITIALIZER(dmabuf_engine.rx_wait),
 	.credit_lock = __SPIN_LOCK_UNLOCKED(dmabuf_engine.credit_lock),
@@ -619,6 +637,8 @@ static void tbv_dmabuf_batch_drop(struct tbv_dmabuf_batch *batch, bool abort)
 		if (lane->rail)
 			tbv_rail_put(lane->rail);
 	}
+	if (dmabuf_poll_us && batch->submitted)
+		atomic_dec(&dmabuf_engine.progress_batches);
 	memset(batch, 0, sizeof(*batch));
 	tbv_dmabuf_record(tx ? TBV_DMABUF_TX_RELEASE : TBV_DMABUF_RX_RELEASE, start);
 	tbv_perf_span(&perf, "batch_release", perf_start, abort ? -ECANCELED : 0, 0);
@@ -881,6 +901,80 @@ out:
 	tbv_perf_span(&perf, "post_worker", started, group->status, 0);
 }
 
+static bool tbv_dmabuf_progress_active(void)
+{
+	return atomic_read(&dmabuf_engine.progress_batches) ||
+		(dmabuf_poll_control &&
+		 atomic_read(&dmabuf_engine.state->verbs_qps));
+}
+
+void tbv_dmabuf_progress_arm(void)
+{
+	if (dmabuf_verbs && dmabuf_poll_us && dmabuf_poll_control &&
+	    !READ_ONCE(dmabuf_engine.progress_stopping))
+		hrtimer_start(&dmabuf_engine.progress_timer,
+			ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC),
+			HRTIMER_MODE_REL);
+}
+
+/* Hop zero belongs to the kernel XDomain control channel. Its ring pointers
+ * share nhi->lock with allocation/free. Only its ordinary worker reaps it. */
+static void tbv_dmabuf_progress_control(struct tb_nhi *nhi)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&nhi->lock, flags);
+	if (!nhi->going_away) {
+		if (nhi->tx_rings[0] && nhi->tx_rings[0]->running)
+			schedule_work(&nhi->tx_rings[0]->work);
+		if (nhi->rx_rings[0] && nhi->rx_rings[0]->running)
+			schedule_work(&nhi->rx_rings[0]->work);
+	}
+	spin_unlock_irqrestore(&nhi->lock, flags);
+}
+
+static void tbv_dmabuf_progress_work(struct work_struct *work)
+{
+	struct tbv_state *state = dmabuf_engine.state;
+	struct tbv_peer *peer;
+
+	if (READ_ONCE(dmabuf_engine.progress_stopping) ||
+	    !tbv_dmabuf_progress_active())
+		return;
+	mutex_lock(&state->lock);
+	list_for_each_entry(peer, &state->peers, node) {
+		struct tbv_rail *rail;
+
+		if (peer->backend != TBV_BACKEND_NATIVE)
+			continue;
+		list_for_each_entry(rail, &peer->rails, node) {
+			mutex_lock(&dmabuf_engine.ring_lock);
+			if (!READ_ONCE(rail->removing) &&
+			    !READ_ONCE(rail->rings_stopped)) {
+				if (rail->path.tx_ring) {
+					schedule_work(&rail->path.tx_ring->work);
+					if (dmabuf_poll_control)
+						tbv_dmabuf_progress_control(rail->path.tx_ring->nhi);
+				}
+				if (rail->path.rx_ring)
+					schedule_work(&rail->path.rx_ring->work);
+			}
+			mutex_unlock(&dmabuf_engine.ring_lock);
+		}
+	}
+	mutex_unlock(&state->lock);
+}
+
+static enum hrtimer_restart tbv_dmabuf_progress_timer(struct hrtimer *timer)
+{
+	if (READ_ONCE(dmabuf_engine.progress_stopping) ||
+	    !tbv_dmabuf_progress_active())
+		return HRTIMER_NORESTART;
+	queue_work(dmabuf_engine.progress_wq, &dmabuf_engine.progress_work);
+	hrtimer_forward_now(timer, ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC));
+	return HRTIMER_RESTART;
+}
+
 static int tbv_dmabuf_batch_post(struct tbv_dmabuf_batch *batch, bool tx)
 {
 	u32 i, groups = 0, frames = 0;
@@ -904,7 +998,16 @@ static int tbv_dmabuf_batch_post(struct tbv_dmabuf_batch *batch, bool tx)
 	}
 	if (!frames)
 		return 0;
-	batch->submitted = true;
+	if (!batch->submitted) {
+		batch->submitted = true;
+		if (dmabuf_poll_us) {
+			atomic_inc(&dmabuf_engine.progress_batches);
+			if (!READ_ONCE(dmabuf_engine.progress_stopping))
+				hrtimer_start(&dmabuf_engine.progress_timer,
+					ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC),
+					HRTIMER_MODE_REL);
+		}
+	}
 	if (!dmabuf_parallel_post || groups < 2 || frames < 128) {
 		for (i = 0; i < batch->count; i++) {
 			ret = tbv_dmabuf_lane_post(&batch->lanes[i], tx, 0,
@@ -2509,6 +2612,8 @@ int tbv_dmabuf_start(struct tbv_state *state)
 {
 	if (!dmabuf_verbs)
 		return 0;
+	if (dmabuf_poll_us && (dmabuf_poll_us < 10 || dmabuf_poll_us > 10000))
+		return -EINVAL;
 	/* Descriptor draining depends on Thunderbolt's ordinary ring workers;
 	 * neither this queue nor the verbs error queue is a reclaim worker. */
 	dmabuf_engine.tx_wq = alloc_ordered_workqueue("tbv_dmabuf_tx", 0);
@@ -2520,6 +2625,22 @@ int tbv_dmabuf_start(struct tbv_state *state)
 		destroy_workqueue(dmabuf_engine.tx_wq);
 		dmabuf_engine.tx_wq = NULL;
 		return -ENOMEM;
+	}
+	atomic_set(&dmabuf_engine.progress_batches, 0);
+	WRITE_ONCE(dmabuf_engine.progress_stopping, false);
+	INIT_WORK(&dmabuf_engine.progress_work, tbv_dmabuf_progress_work);
+	hrtimer_setup(&dmabuf_engine.progress_timer, tbv_dmabuf_progress_timer,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	if (dmabuf_poll_us) {
+		dmabuf_engine.progress_wq = alloc_workqueue("tbv_dmabuf_progress",
+			WQ_UNBOUND | WQ_HIGHPRI, 1);
+		if (!dmabuf_engine.progress_wq) {
+			destroy_workqueue(dmabuf_engine.post_wq);
+			destroy_workqueue(dmabuf_engine.tx_wq);
+			dmabuf_engine.post_wq = NULL;
+			dmabuf_engine.tx_wq = NULL;
+			return -ENOMEM;
+		}
 	}
 	memset(&dmabuf_engine.rx, 0, sizeof(dmabuf_engine.rx));
 	memset(dmabuf_engine.credits, 0, sizeof(dmabuf_engine.credits));
@@ -2537,6 +2658,9 @@ void tbv_dmabuf_stop(void)
 {
 	if (!dmabuf_engine.tx_wq)
 		return;
+	WRITE_ONCE(dmabuf_engine.progress_stopping, true);
+	hrtimer_cancel(&dmabuf_engine.progress_timer);
+	cancel_work_sync(&dmabuf_engine.progress_work);
 	cancel_delayed_work_sync(&dmabuf_engine.rx_watchdog);
 	cancel_work_sync(&dmabuf_engine.credit_work);
 	mutex_lock(&dmabuf_engine.rx_lock);
@@ -2552,6 +2676,10 @@ void tbv_dmabuf_stop(void)
 	dmabuf_engine.tx_wq = NULL;
 	destroy_workqueue(dmabuf_engine.post_wq);
 	dmabuf_engine.post_wq = NULL;
+	if (dmabuf_engine.progress_wq) {
+		destroy_workqueue(dmabuf_engine.progress_wq);
+		dmabuf_engine.progress_wq = NULL;
+	}
 }
 
 /* The DMA-BUF attachment API used for imported GPU memory. */

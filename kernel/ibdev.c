@@ -2660,6 +2660,7 @@ static int tbv_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *init_attr,
 		mutex_unlock(&state->lock);
 	}
 	atomic_inc(&tqp->owner->verbs_qps);
+	tbv_dmabuf_progress_arm();
 	return 0;
 
 err_put_rail:

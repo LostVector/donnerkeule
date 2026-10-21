@@ -19,6 +19,7 @@ struct tbv_dmabuf_buffer {
 	int (*finish)(void *context, int status);
 };
 
+void tbv_dmabuf_progress_arm(void);
 bool tbv_dmabuf_verbs_enabled(void);
 bool tbv_dmabuf_credits_enabled(void);
 void tbv_dmabuf_recv_posted(void *owner);
