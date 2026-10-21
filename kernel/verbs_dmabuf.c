@@ -1095,6 +1095,42 @@ static void tbv_dmabuf_progress_stop(void)
 	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
 }
 
+/* The fallback timer only needs to wake an ordinary ring worker when its
+ * next descriptor is complete. Do not reap, alter IRQs, or wait for a whole
+ * group: partial completions must return credits and preserve ring progress.
+ * The NHI ABI is the same pinned, opt-in ABI as bulk publication above. */
+static bool tbv_dmabuf_ring_ready(struct tb_ring *ring)
+{
+	struct tbv_bulk_desc *descs;
+	struct pci_dev *pdev;
+	unsigned long flags;
+	bool ready = true;
+
+	if (!dmabuf_batch_doorbell || !dev_is_pci(ring->nhi->dev))
+		return true;
+	pdev = to_pci_dev(ring->nhi->dev);
+	if (pdev->vendor != PCI_VENDOR_ID_AMD ||
+	    (pdev->device != 0x158d && pdev->device != 0x158e) ||
+	    ring->start_poll)
+		return true;
+	spin_lock_irqsave(&ring->lock, flags);
+	if (!ring->running || READ_ONCE(ring->nhi->going_away)) {
+		ready = false;
+	} else if (ring->descriptors && ring->size > 1 &&
+		   ring->head >= 0 && ring->head < ring->size &&
+		   ring->tail >= 0 && ring->tail < ring->size) {
+		if (ring->head == ring->tail) {
+			ready = !list_empty(&ring->queue);
+		} else {
+			descs = (struct tbv_bulk_desc *)ring->descriptors;
+			ready = (le32_to_cpu(READ_ONCE(descs[ring->tail].metadata)) >> 20) &
+				RING_DESC_COMPLETED;
+		}
+	}
+	spin_unlock_irqrestore(&ring->lock, flags);
+	return ready;
+}
+
 /* Hop zero belongs to the kernel XDomain control channel. Its ring pointers
  * share nhi->lock with allocation/free. Only its ordinary worker reaps it. */
 static void tbv_dmabuf_progress_control(struct tb_nhi *nhi)
@@ -1103,9 +1139,9 @@ static void tbv_dmabuf_progress_control(struct tb_nhi *nhi)
 
 	spin_lock_irqsave(&nhi->lock, flags);
 	if (!nhi->going_away) {
-		if (nhi->tx_rings[0] && nhi->tx_rings[0]->running)
+		if (nhi->tx_rings[0] && tbv_dmabuf_ring_ready(nhi->tx_rings[0]))
 			schedule_work(&nhi->tx_rings[0]->work);
-		if (nhi->rx_rings[0] && nhi->rx_rings[0]->running)
+		if (nhi->rx_rings[0] && tbv_dmabuf_ring_ready(nhi->rx_rings[0]))
 			schedule_work(&nhi->rx_rings[0]->work);
 	}
 	spin_unlock_irqrestore(&nhi->lock, flags);
@@ -1130,11 +1166,12 @@ static void tbv_dmabuf_progress_work(struct work_struct *work)
 			if (!READ_ONCE(rail->removing) &&
 			    !READ_ONCE(rail->rings_stopped)) {
 				if (rail->path.tx_ring) {
-					schedule_work(&rail->path.tx_ring->work);
+					if (tbv_dmabuf_ring_ready(rail->path.tx_ring))
+						schedule_work(&rail->path.tx_ring->work);
 					if (dmabuf_poll_control)
 						tbv_dmabuf_progress_control(rail->path.tx_ring->nhi);
 				}
-				if (rail->path.rx_ring)
+				if (rail->path.rx_ring && tbv_dmabuf_ring_ready(rail->path.rx_ring))
 					schedule_work(&rail->path.rx_ring->work);
 			}
 			mutex_unlock(&dmabuf_engine.ring_lock);
