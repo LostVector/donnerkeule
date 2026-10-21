@@ -889,6 +889,33 @@ static void tbv_dmabuf_complete(struct tb_ring *ring, struct ring_frame *frame,
 	}
 }
 
+/* A credit RELEASE may nest inside an ordinary TX batch which already leases
+ * the rail cache. Its bounded filler must own private metadata/staging; it must
+ * never steal, clear, or wait for the outer batch's lease. The ordered TX queue
+ * permits at most one such filler (at most dmabuf_credit_max bytes) at a time. */
+static int tbv_dmabuf_lane_alloc(struct tbv_dmabuf_lane *lane,
+			       const struct tbv_dmabuf_buffer *buffer, bool tx)
+{
+	if (dmabuf_reuse_buffers && !buffer->uncached) {
+		int ret = tbv_dmabuf_cache_get(lane, tx, !buffer->mr && !buffer->host_mr);
+
+		if (ret)
+			return ret;
+	} else {
+		lane->frames = kcalloc(lane->count, sizeof(*lane->frames), GFP_KERNEL);
+		if (!lane->frames)
+			return -ENOMEM;
+	}
+	if (!buffer->mr && !buffer->host_mr && !lane->cache) {
+		lane->staging_bytes = lane->count * TBV_DMABUF_FRAME_BYTES;
+		lane->staging = dma_alloc_coherent(lane->dev, lane->staging_bytes,
+						   &lane->staging_dma, GFP_KERNEL);
+		if (!lane->staging)
+			return -ENOMEM;
+	}
+	return 0;
+}
+
 static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 				  const struct tbv_dmabuf_wire *m,
 				  const struct tbv_dmabuf_buffer *buffer, bool tx)
@@ -932,22 +959,11 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 			dma_sync_sgtable_for_device(lane->dev, &lane->host_map->sgt, DMA_BIDIRECTIONAL);
 		}
 		perf_start = tbv_perf_clock();
-		if (dmabuf_reuse_buffers) {
-			int ret = tbv_dmabuf_cache_get(lane, tx, !buffer->mr && !buffer->host_mr);
+		{
+			int ret = tbv_dmabuf_lane_alloc(lane, buffer, tx);
 
 			if (ret)
 				return ret;
-		} else {
-			lane->frames = kcalloc(lane->count, sizeof(*lane->frames), GFP_KERNEL);
-			if (!lane->frames)
-				return -ENOMEM;
-		}
-		if (!buffer->mr && !buffer->host_mr && !lane->cache) {
-			lane->staging_bytes = lane->count * TBV_DMABUF_FRAME_BYTES;
-			lane->staging = dma_alloc_coherent(lane->dev, lane->staging_bytes,
-							   &lane->staging_dma, GFP_KERNEL);
-			if (!lane->staging)
-				return -ENOMEM;
 		}
 		tbv_perf_span(&lane->perf, "lane_alloc", perf_start, 0, lane->count);
 		perf_start = tbv_perf_clock();
@@ -2444,6 +2460,7 @@ static void tbv_dmabuf_credit_release(struct tbv_state *state,
 	struct tbv_dmabuf_wire m = *credit;
 	struct tbv_dmabuf_batch batch = {};
 	struct tbv_dmabuf_buffer buffer = {
+		.uncached = true,
 		.copy = tbv_dmabuf_zero_copy,
 		.alive = tbv_dmabuf_always_alive,
 	};
