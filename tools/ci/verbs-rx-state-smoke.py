@@ -39,14 +39,16 @@ struct list_head { struct list_head *next; };
 #define time_after_eq(a, b) ((long)((a) - (b)) >= 0)
 #define wake_up_all(q) ((void)(q))
 /* Waits observe the state at the call; tests stage asynchronous events. */
-#define wait_event_timeout(q, cond, t) ((void)(q), (cond) ? 1 : 0)
-#define queue_work(wq, work) (queued++, true)
+static long mock_wait_timeout(bool condition) { return condition ? 1 : 0; }
+#define wait_event_timeout(q, cond, t) ((void)(q), (void)(t), mock_wait_timeout(cond))
+#define queue_work(wq, work) mock_queue_work()
 #define pr_warn_ratelimited(...) ((void)0)
 static unsigned long jiffies;
 static bool dmabuf_verbs = true;
 static bool dmabuf_credits = true;
 static unsigned int dmabuf_credit_max = 1u << 20;
 static unsigned int queued;
+static bool mock_queue_work(void) { queued++; return true; }
 static int begin_result, alloc_result, post_result, copy_result, finish_result;
 static unsigned int begins, finishes, copies, drops, ref_gets, ref_puts, notifications;
 static int notified;
