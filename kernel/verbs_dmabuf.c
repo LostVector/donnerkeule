@@ -9,6 +9,9 @@
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
 #include <linux/hrtimer.h>
+#include <linux/io.h>
+#include <linux/pci.h>
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
 #include <linux/seq_file.h>
@@ -43,6 +46,21 @@ static bool dmabuf_poll_control;
 module_param(dmabuf_poll_control, bool, 0444);
 MODULE_PARM_DESC(dmabuf_poll_control,
 	"Also progress existing XDomain control rings while a verbs QP exists; requires dmabuf_poll_us");
+
+/* Opt-in for the verified Linux 7.2.6 / AMD 158d/158e NHI ring ABI. */
+static bool dmabuf_batch_doorbell;
+module_param(dmabuf_batch_doorbell, bool, 0444);
+MODULE_PARM_DESC(dmabuf_batch_doorbell,
+	"Publish a data-ring descriptor group with one MMIO doorbell on verified 7.2.6 AMD NHIs");
+static uint dmabuf_post_burst = 16;
+module_param(dmabuf_post_burst, uint, 0444);
+MODULE_PARM_DESC(dmabuf_post_burst, "Frames posted per rail turn, 1..512; default 16");
+static atomic64_t dmabuf_bulk_calls, dmabuf_bulk_frames, dmabuf_bulk_fallback;
+static bool dmabuf_coalesce_copy;
+module_param(dmabuf_coalesce_copy, bool, 0444);
+MODULE_PARM_DESC(dmabuf_coalesce_copy,
+	"Copy each host-staged TX lane once instead of once per 4 KiB frame");
+static atomic64_t dmabuf_copy_chunks, dmabuf_copy_bytes;
 
 static bool dmabuf_profile;
 module_param(dmabuf_profile, bool, 0444);
@@ -152,6 +170,14 @@ void tbv_dmabuf_debugfs_show(struct seq_file *s)
 	seq_printf(s, "dmabuf_verbs: %u\n", dmabuf_verbs);
 	seq_printf(s, "dmabuf_index: %u\n", dmabuf_index);
 	seq_printf(s, "dmabuf_profile: %u\n", dmabuf_profile);
+	seq_printf(s, "dmabuf_coalesce_copy: %u\n", dmabuf_coalesce_copy);
+	seq_printf(s, "dmabuf_copy_chunks: %lld\n", atomic64_read(&dmabuf_copy_chunks));
+	seq_printf(s, "dmabuf_copy_bytes: %lld\n", atomic64_read(&dmabuf_copy_bytes));
+	seq_printf(s, "dmabuf_batch_doorbell: %u\n", dmabuf_batch_doorbell);
+	seq_printf(s, "dmabuf_post_burst: %u\n", dmabuf_post_burst);
+	seq_printf(s, "dmabuf_bulk_calls: %lld\n", atomic64_read(&dmabuf_bulk_calls));
+	seq_printf(s, "dmabuf_bulk_frames: %lld\n", atomic64_read(&dmabuf_bulk_frames));
+	seq_printf(s, "dmabuf_bulk_fallback: %lld\n", atomic64_read(&dmabuf_bulk_fallback));
 	seq_printf(s, "dmabuf_rx_eager: %u\n", dmabuf_rx_eager);
 	seq_printf(s, "dmabuf_parallel_post: %u\n", dmabuf_parallel_post);
 	seq_printf(s, "dmabuf_control_ring: %u\n", tbv_control_enabled());
@@ -800,7 +826,7 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 			} else {
 				f->frame.buffer_phy = lane->staging_dma +
 					n * TBV_DMABUF_FRAME_BYTES;
-				if (tx) {
+				if (tx && !dmabuf_coalesce_copy) {
 					ret = buffer->copy(buffer->context, m->offset + offset,
 						lane->staging + n * TBV_DMABUF_FRAME_BYTES,
 						f->bytes, false);
@@ -809,6 +835,19 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 				}
 			}
 		}
+	/* The lane covers a contiguous, validated slice of the same WR.
+	 * Copy only its payload, retaining the existing per-MR bounds checks. */
+	if (tx && !buffer->mr && dmabuf_coalesce_copy) {
+		u32 offset = lane->first * TBV_DMABUF_FRAME_BYTES;
+		u32 bytes = min_t(u32, lane->staging_bytes, m->bytes - offset);
+		int ret = buffer->copy(buffer->context, m->offset + offset,
+			lane->staging, bytes, false);
+
+		if (ret)
+			return ret;
+		atomic64_inc(&dmabuf_copy_chunks);
+		atomic64_add(bytes, &dmabuf_copy_bytes);
+	}
 		tbv_perf_span(&lane->perf, "lane_build", perf_start, 0, lane->count);
 	}
 	return 0;
@@ -830,6 +869,108 @@ static int tbv_dmabuf_batch_alloc(struct tbv_dmabuf_batch *batch,
 	return ret;
 }
 
+/*
+ * Optional data-ring publication for the verified 7.2.6 AMD 158d/158e NHIs.
+ * The ordinary Thunderbolt worker still owns completion and cancellation.
+ * No control-channel ring or GPU-direct polling ring uses this helper.
+ */
+struct tbv_bulk_desc {
+	__le64 address;
+	__le32 metadata;
+	__le32 timestamp;
+};
+
+static int tbv_dmabuf_post_bulk(struct tbv_dmabuf_lane *lane, bool tx,
+			       u32 first, u32 count)
+{
+	struct tb_ring *ring = tx ? lane->rail->path.tx_ring : lane->rail->path.rx_ring;
+	struct tbv_bulk_desc *descs;
+	struct pci_dev *pdev;
+	unsigned long irqflags;
+	u32 n, head, available;
+	void __iomem *doorbell;
+
+	if (!dmabuf_batch_doorbell || count < 2)
+		return -EAGAIN;
+#if !defined(CONFIG_X86_64) || LINUX_VERSION_CODE != KERNEL_VERSION(7, 2, 6)
+	return -EOPNOTSUPP;
+#endif
+	BUILD_BUG_ON(sizeof(struct tbv_bulk_desc) != 16);
+	BUILD_BUG_ON(sizeof(struct tb_ring) != 184);
+	BUILD_BUG_ON(offsetof(struct tb_ring, descriptors) != 32);
+	BUILD_BUG_ON(offsetof(struct tb_ring, in_flight) != 64);
+	if (first > lane->count || count > lane->count - first)
+		return -EINVAL;
+	if (!dev_is_pci(ring->nhi->dev))
+		goto fallback;
+	pdev = to_pci_dev(ring->nhi->dev);
+	if (pdev->vendor != PCI_VENDOR_ID_AMD ||
+	    (pdev->device != 0x158d && pdev->device != 0x158e) ||
+	    !(ring->flags & RING_FLAG_FRAME) || ring->start_poll ||
+	    ring->is_tx != tx || ring->hop <= 0 ||
+	    ring->hop >= ring->nhi->hop_count)
+		goto fallback;
+
+	/* Same ring serialization as __tb_ring_enqueue() and ring_work(). */
+	spin_lock_irqsave(&ring->lock, irqflags);
+	if (!ring->running || READ_ONCE(ring->nhi->going_away)) {
+		spin_unlock_irqrestore(&ring->lock, irqflags);
+		return -ESHUTDOWN;
+	}
+	if (!list_empty(&ring->queue) || ring->size <= 1 ||
+	    ring->size > U16_MAX || ring->head < 0 || ring->head >= ring->size ||
+	    ring->tail < 0 || ring->tail >= ring->size) {
+		spin_unlock_irqrestore(&ring->lock, irqflags);
+		goto fallback;
+	}
+	available = (ring->tail + ring->size - ring->head - 1) % ring->size;
+	if (available < count) {
+		spin_unlock_irqrestore(&ring->lock, irqflags);
+		goto fallback;
+	}
+	for (n = first; n < first + count; n++) {
+		if (!list_empty(&lane->frames[n].frame.list)) {
+			spin_unlock_irqrestore(&ring->lock, irqflags);
+			return -EINVAL;
+		}
+	}
+	descs = (struct tbv_bulk_desc *)ring->descriptors;
+	head = ring->head;
+	for (n = first; n < first + count; n++) {
+		struct ring_frame *frame = &lane->frames[n].frame;
+		struct tbv_bulk_desc *d = &descs[head];
+		u32 flags = RING_DESC_POSTED;
+		u32 metadata;
+
+		/* The final descriptor notifies for the entire ordered group. */
+		if (n + 1 == first + count)
+			flags |= RING_DESC_INTERRUPT;
+		metadata = tx ? frame->size | frame->eof << 12 | frame->sof << 16 :
+			le32_to_cpu(READ_ONCE(d->metadata)) & GENMASK(19, 0);
+		WRITE_ONCE(d->address, cpu_to_le64(frame->buffer_phy));
+		WRITE_ONCE(d->timestamp, 0);
+		WRITE_ONCE(d->metadata, cpu_to_le32(metadata | flags << 20));
+		list_add_tail(&frame->list, &ring->in_flight);
+		head = (head + 1) % ring->size;
+	}
+	ring->head = head;
+	/* Descriptors must reach coherent memory before advancing hardware. */
+	dma_wmb();
+	doorbell = ring->nhi->iobase + (tx ? 0 : 0x08000) + ring->hop * 16 + 8;
+	iowrite32(tx ? head << 16 : head, doorbell);
+	spin_unlock_irqrestore(&ring->lock, irqflags);
+	atomic64_inc(&dmabuf_bulk_calls);
+	atomic64_add(count, &dmabuf_bulk_frames);
+	if (tx) {
+		atomic64_add(count, &lane->rail->peer->state->data_tx_posted);
+		atomic64_add(count, &lane->rail->path.data_tx_posted);
+	}
+	return 0;
+fallback:
+	atomic64_inc(&dmabuf_bulk_fallback);
+	return -EAGAIN;
+}
+
 static int tbv_dmabuf_lane_post(struct tbv_dmabuf_lane *lane, bool tx,
 			       u32 first, u32 count)
 {
@@ -844,6 +985,10 @@ static int tbv_dmabuf_lane_post(struct tbv_dmabuf_lane *lane, bool tx,
 		ret = -ENOTCONN;
 		goto out;
 	}
+	ret = tbv_dmabuf_post_bulk(lane, tx, first, count);
+	if (ret != -EAGAIN)
+		goto out;
+	ret = 0;
 	for (n = first; n < first + count; n++) {
 		ret = tx ? tb_ring_tx(ring, &lane->frames[n].frame) :
 			   tb_ring_rx(ring, &lane->frames[n].frame);
@@ -885,14 +1030,14 @@ static void tbv_dmabuf_post_group(struct work_struct *work)
 	/* Start every rail before filling any one ring. Posting a whole rail
 	 * first leaves its sibling idle during hundreds of MMIO writes. Small
 	 * turns overlap their DMA while preserving each ring's frame order. */
-	for (first = 0; first < frames; first += 16) {
+	for (first = 0; first < frames; first += dmabuf_post_burst) {
 		for (i = 0; i < group->batch->count; i++) {
 			struct tbv_dmabuf_lane *lane = &group->batch->lanes[i];
 
 			if (lane->dev != group->dev || first >= lane->count)
 				continue;
 			group->status = tbv_dmabuf_lane_post(lane, group->batch->tx,
-				first, min_t(u32, 16, lane->count - first));
+				first, min_t(u32, dmabuf_post_burst, lane->count - first));
 			if (group->status)
 				goto out;
 		}
@@ -2612,6 +2757,12 @@ int tbv_dmabuf_start(struct tbv_state *state)
 {
 	if (!dmabuf_verbs)
 		return 0;
+	if (!dmabuf_post_burst || dmabuf_post_burst > TBV_DMABUF_BATCH_FRAMES)
+		return -EINVAL;
+#if !defined(CONFIG_X86_64) || LINUX_VERSION_CODE != KERNEL_VERSION(7, 2, 6)
+	if (dmabuf_batch_doorbell)
+		return -EOPNOTSUPP;
+#endif
 	if (dmabuf_poll_us && (dmabuf_poll_us < 10 || dmabuf_poll_us > 10000))
 		return -EINVAL;
 	/* Descriptor draining depends on Thunderbolt's ordinary ring workers;
