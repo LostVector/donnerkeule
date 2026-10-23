@@ -910,16 +910,21 @@ static void tbv_tbnet_minimal_disable_paths(struct tbv_tbnet_minimal_session *s)
 static void tbv_tbnet_minimal_teardown_path(struct tbv_tbnet_minimal_session *s)
 {
 	mutex_lock(&s->lock);
-	if (s->rings_started) {
-		tb_ring_stop(s->rx_ring);
-		tb_ring_stop(s->tx_ring);
-		s->rings_started = false;
-	}
+	/*
+	 * Disable the DMA paths while the rings are still running so frames in
+	 * flight can drain; tb_ring_stop() clears the descriptor base. This is
+	 * the order of the thunderbolt-net teardown fix (CVE-2026-74691).
+	 */
 	if (s->path_enabled) {
 		tbv_tbnet_minimal_disable_paths(s);
 		tb_xdomain_release_in_hopid(s->xd, s->remote_transmit_path);
 		s->path_enabled = false;
 		s->remote_transmit_path = 0;
+	}
+	if (s->rings_started) {
+		tb_ring_stop(s->rx_ring);
+		tb_ring_stop(s->tx_ring);
+		s->rings_started = false;
 	}
 	s->login_sent = false;
 	s->login_received = false;
