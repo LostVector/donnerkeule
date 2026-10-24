@@ -2309,6 +2309,15 @@ static int tbv_get_port_immutable(struct ib_device *ibdev, u32 port_num,
 	immutable->gid_tbl_len = attr.gid_tbl_len;
 	immutable->core_cap_flags = RDMA_CORE_PORT_IBA_ROCE_UDP_ENCAP;
 	immutable->max_mad_size = IB_MGMT_MAD_SIZE;
+	/* DMA-BUF verbs accepts RC QPs only, so kernel MAD/GSI and IB CM
+	 * clients cannot operate on these ports. Keep the RoCE addressing
+	 * and GID capabilities while avoiding unsupported QP1 creation.
+	 */
+	if (tbv_dmabuf_verbs_enabled()) {
+		immutable->core_cap_flags &= ~(RDMA_CORE_CAP_IB_MAD |
+					     RDMA_CORE_CAP_IB_CM);
+		immutable->max_mad_size = 0;
+	}
 	return 0;
 }
 
