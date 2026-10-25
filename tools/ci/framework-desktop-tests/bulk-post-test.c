@@ -14,6 +14,8 @@ typedef int64_t atomic64_t;
 #define CONFIG_X86_64 1
 #define KERNEL_VERSION(a,b,c) (((a)<<16)|((b)<<8)|(c))
 #define LINUX_VERSION_CODE KERNEL_VERSION(7,2,6)
+/* kernel/verbs_dmabuf.c defines this for x86_64 Linux 7.2.x. */
+#define TBV_BULK_NHI_ABI 1
 #define __iomem
 #define U16_MAX UINT16_MAX
 #define PCI_VENDOR_ID_AMD 0x1022

@@ -48,11 +48,19 @@ module_param(dmabuf_poll_control, bool, 0444);
 MODULE_PARM_DESC(dmabuf_poll_control,
 	"Also progress existing XDomain control rings while a verbs QP exists; requires dmabuf_poll_us");
 
-/* Opt-in for the verified Linux 7.2.6 / AMD 158d/158e NHI ring ABI. */
+/*
+ * Opt-in for the AMD 158d/158e NHI ring ABI. The tb_ring layout is checked at
+ * build time; it was qualified on Linux 7.2.6 (Ubuntu, Framework Desktop) and
+ * 7.2.11 (Fedora, Sixunited AXB35 / Bosgame M5). Other kernels compile it out.
+ */
+#if defined(CONFIG_X86_64) && LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
+#define TBV_BULK_NHI_ABI 1
+#endif
 static bool dmabuf_batch_doorbell;
 module_param(dmabuf_batch_doorbell, bool, 0444);
 MODULE_PARM_DESC(dmabuf_batch_doorbell,
-	"Publish a data-ring descriptor group with one MMIO doorbell on verified 7.2.6 AMD NHIs");
+	"Publish a data-ring descriptor group with one MMIO doorbell on AMD 158d/158e NHIs (Linux 7.2.x)");
 static uint dmabuf_post_burst = 16;
 module_param(dmabuf_post_burst, uint, 0444);
 MODULE_PARM_DESC(dmabuf_post_burst, "Frames posted per rail turn, 1..512; default 16");
@@ -1045,7 +1053,7 @@ static int tbv_dmabuf_batch_alloc(struct tbv_dmabuf_batch *batch,
 }
 
 /*
- * Optional data-ring publication for the verified 7.2.6 AMD 158d/158e NHIs.
+ * Optional data-ring publication for AMD 158d/158e NHIs (TBV_BULK_NHI_ABI).
  * The ordinary Thunderbolt worker still owns completion and cancellation.
  * No control-channel ring or GPU-direct polling ring uses this helper.
  */
@@ -1067,13 +1075,14 @@ static int tbv_dmabuf_post_bulk(struct tbv_dmabuf_lane *lane, bool tx,
 
 	if (!dmabuf_batch_doorbell || count < 2)
 		return -EAGAIN;
-#if !defined(CONFIG_X86_64) || LINUX_VERSION_CODE != KERNEL_VERSION(7, 2, 6)
+#ifndef TBV_BULK_NHI_ABI
 	return -EOPNOTSUPP;
-#endif
+#else
 	BUILD_BUG_ON(sizeof(struct tbv_bulk_desc) != 16);
 	BUILD_BUG_ON(sizeof(struct tb_ring) != 184);
 	BUILD_BUG_ON(offsetof(struct tb_ring, descriptors) != 32);
 	BUILD_BUG_ON(offsetof(struct tb_ring, in_flight) != 64);
+#endif
 	if (first > lane->count || count > lane->count - first)
 		return -EINVAL;
 	if (!dev_is_pci(ring->nhi->dev))
@@ -3007,7 +3016,7 @@ int tbv_dmabuf_start(struct tbv_state *state)
 		return 0;
 	if (!dmabuf_post_burst || dmabuf_post_burst > TBV_DMABUF_BATCH_FRAMES)
 		return -EINVAL;
-#if !defined(CONFIG_X86_64) || LINUX_VERSION_CODE != KERNEL_VERSION(7, 2, 6)
+#ifndef TBV_BULK_NHI_ABI
 	if (dmabuf_batch_doorbell)
 		return -EOPNOTSUPP;
 #endif
