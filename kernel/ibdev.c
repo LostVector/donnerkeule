@@ -88,6 +88,11 @@ module_param(roce_netdev, charp, 0444);
 MODULE_PARM_DESC(roce_netdev,
 		 "Netdev used for RoCE GID metadata, for example br0.lan");
 
+static bool dmabuf_host_credits;
+module_param(dmabuf_host_credits, bool, 0444);
+MODULE_PARM_DESC(dmabuf_host_credits,
+                 "Pre-arm SEND credits for eligible aligned host MRs (default off)");
+
 const char *tbv_ibdev_roce_netdev_name(void)
 {
 	return roce_netdev;
@@ -9867,7 +9872,7 @@ fail:
 }
 
 /*
- * Pre-arm the head receive WQE of a GPU SEND stream. Validates exactly as
+ * Pre-arm the head receive WQE of a GPU or opted-in direct host SEND stream. Validates exactly as
  * tbv_ibdev_dmabuf_begin() for a SEND of hdr->length at the QP's expected
  * PSN, which it returns in hdr->psn, but leaves the WQE posted. Returns
  * -EAGAIN with buffer->owner set (no reference) when the RQ is empty.
@@ -9914,7 +9919,7 @@ int tbv_ibdev_dmabuf_peek(struct tbv_state *state, struct tbv_rail *rail,
 	ctx->hdr = *hdr;
 	ctx->peeked = true;
 	ctx->mr = tbv_mr_get(state, ctx->wqe.lkey);
-	if (!ctx->mr || !ctx->mr->dmabuf || ctx->mr->base.pd != tqp->base.pd ||
+	if (!ctx->mr || ctx->mr->dma_mr || ctx->mr->base.pd != tqp->base.pd ||
 	    !(ctx->mr->access & IB_ACCESS_LOCAL_WRITE) ||
 	    hdr->length % 32 || ALIGN(hdr->length, SZ_4K) > ctx->wqe.length)
 		goto fail;
@@ -9924,8 +9929,18 @@ int tbv_ibdev_dmabuf_peek(struct tbv_state *state, struct tbv_rail *rail,
 	    ctx->address < ctx->mr->virt_addr || end > mr_end ||
 	    (ctx->address - ctx->mr->virt_addr) % SZ_4K)
 		goto fail;
+	/* Ordinary pages may be armed only through the direct-host DMA path.
+	 * Its eligibility check keeps page alignment, pinned-page ownership,
+	 * bounded MR size and full logical-length bounds. Staging is never
+	 * speculative: it would need a separate lease from a running TX. */
+	if (!ctx->mr->dmabuf &&
+	    (!dmabuf_host_credits ||
+	     !tbv_host_dma_eligible(ctx->mr, ctx->address - ctx->mr->virt_addr,
+	                           hdr->length)))
+		goto fail;
 	*buffer = (struct tbv_dmabuf_buffer) {
 		.mr = ctx->mr->dmabuf,
+		.host_mr = ctx->mr->dmabuf ? NULL : ctx->mr,
 		.offset = ctx->address - ctx->mr->virt_addr,
 		.owner = tqp,
 		.context = ctx,

@@ -1489,7 +1489,7 @@ static void tbv_dmabuf_rx_finish(int status)
 {
 	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
 	struct tbv_control *ctrl = rx->control;
-	bool gpu = rx->buffer.mr;
+	bool direct = rx->buffer.mr || rx->buffer.host_mr;
 	u64 start;
 
 	tbv_dmabuf_batch_drop(&rx->batch, !!status);
@@ -1510,7 +1510,7 @@ static void tbv_dmabuf_rx_finish(int status)
 		tbv_control_get(ctrl);
 	tbv_dmabuf_rx_notify(status ?: TBV_DMABUF_DONE);
 	/* After DONE, so the credit never delays this WR's completion. */
-	if (!status && gpu)
+	if (!status && direct)
 		tbv_dmabuf_credit_next(ctrl);
 	tbv_control_put(ctrl);
 }

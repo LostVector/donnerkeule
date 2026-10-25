@@ -354,3 +354,10 @@ int main(void) {
 }
 """
 run_c("rx-state", shim + state + counters + rx + mocks + body + cases)
+
+# Run the same receive, failure and lifetime cases with an ordinary direct MR.
+assert mocks.count(".mr = &gpu_mr") == 1
+assert cases.count("dmabuf_engine.rx.buffer.mr = &gpu_mr") == 1
+host_mocks=mocks.replace(".mr = &gpu_mr", ".host_mr = &gpu_mr")
+host_cases=cases.replace("dmabuf_engine.rx.buffer.mr = &gpu_mr", "dmabuf_engine.rx.buffer.host_mr = &gpu_mr")
+run_c("rx-state-host", shim + state + counters + rx + host_mocks + body + host_cases)
