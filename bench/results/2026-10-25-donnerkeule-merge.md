@@ -117,6 +117,36 @@ AXB35 profile was at or above the production median everywhere and had the small
 spread, so it is installed. The transport gains show up in host-memory
 bandwidth and large exchanges, which Gufo's decode does not exercise.
 
+## perftest sweep: native vs DMA-BUF verbs
+
+The README charts were redrawn from two `sweep_perftest.py` runs (fuzzy
+client, misty server, host memory, 1 QP): the installed module with
+`dmabuf_verbs=0` (native, write striping) and with the AXB35 DMA-BUF profile.
+Native reproduces the 30 September curves within a few percent. Selected
+values (Gb/s or median µs; busy cores client/server in parentheses):
+
+| Test | Size | Native | DMA-BUF |
+|---|---:|---:|---:|
+| ib_write_bw | 4 KiB | 9.11 (2.3/1.2) | 0.83 (1.4/0.3) |
+| ib_write_bw | 256 KiB | 41.9 (4.6/4.1) | 21.7 (1.3/0.3) |
+| ib_write_bw | 4 MiB | 43.2 (4.3/2.7) | 42.9 (1.3/0.4) |
+| ib_write_bw bidirectional | 4 MiB | 83.0 (7.7/8.5) | 82.4 (1.5/1.6) |
+| ib_send_bw | 256 KiB | 27.1 (2.5/4.9) | 23.2 (1.3/1.3) |
+| ib_send_bw | 4 MiB | fails | 38.8 (1.3/1.3) |
+| ib_read_bw | 256 KiB | 9.69 | not supported |
+| ib_write_lat | 64 B | 7.15 | 29.8 |
+| ib_send_lat | 64 B | 10.2 | 31.3 |
+| ib_send_lat | 256 KiB | 104.1 | 65.5 |
+
+Native keeps the lower small-message latency, the higher bandwidth below
+4 MiB and RDMA READ; DMA-BUF needs far fewer cores and handles large SENDs.
+Native `ib_read_lat` is flaky (16 KiB and 256 KiB failed in one run, 1 KiB,
+16 KiB, 64 KiB and 256 KiB in the next) and native SENDs above 512 KiB fail
+with `native SEND reorder store failed`. Native runs log rate-limited
+retransmits that all recover; DMA-BUF runs were clean with 0 credit
+mismatches. CSVs: [sweep/](2026-10-25-donnerkeule-merge/sweep/) (`charts.csv`
+is what `plot_perftest.py` drew; `*-big.csv` are the uncapped checks).
+
 ## Installed state
 
 Both hosts run DKMS `thunderbolt-ibverbs/0.4.0.dk1` (this branch) with the

@@ -120,10 +120,14 @@ python3 bench/plot_perftest.py sweep.csv --out docs/img   # needs matplotlib
 `--gid` selects the RoCE v2 GID for `usb4_rdma` (1 with an IPv4 address on
 `roce_netdev`) and 0 for InfiniBand. Both hosts need perftest; the server is
 reached by `ssh <server>` without a password. A case that fails leaves its
-cells empty. The `--max-size` caps skip what currently fails:
-READs above 512 KiB fail on this driver without striping as well, and SENDs
-above 512 KiB fail with `native_write_striping` (which enables fragment
-striping for SENDs).
+cells empty. The `--max-size` caps skip what currently fails in native mode:
+`ib_read_bw` above 512 KiB fails on this driver without striping as well, and
+`ib_send_bw` above 512 KiB fails with `native_write_striping` (which enables
+fragment striping for SENDs); the `_lat` tests passed at 1 MiB on 25 October.
+DMA-BUF verbs mode (`dmabuf_verbs=1`) has no RDMA READ, and its SENDs pass at
+all sizes. The current charts combine a native and a DMA-BUF sweep with the
+InfiniBand data; their CSVs and the reload script are in
+[2026-10-25-donnerkeule-merge](results/2026-10-25-donnerkeule-merge/sweep/).
 
 Latency runs a fixed number of iterations (a probe sizes it to about
 `--seconds`, at most 50 000) and reports the typical, that is median,

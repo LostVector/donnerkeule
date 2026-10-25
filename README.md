@@ -19,10 +19,17 @@ a linux kernel module + userspace shim to emulate an InfiniBand RDMA verb device
 
 ### Some striping benchmarks vs. Infiniband
 
-![Bandwidth by verb and message size with the busy CPU cores of both hosts, 1 QP: usb4_rdma over two USB4 cables with write striping vs InfiniBand FDR on PCIe 3.0 x4](docs/img/bw_vs_size.svg)
+![Bandwidth by verb and message size with the busy CPU cores of both hosts, 1 QP: usb4_rdma over two USB4 cables in native mode with write striping and in DMA-BUF verbs mode, vs InfiniBand FDR on PCIe 3.0 x4](docs/img/bw_vs_size.svg)
 
-![One-way latency by verb and message size with the busy CPU cores of both hosts, 1 QP: usb4_rdma over two USB4 cables vs InfiniBand FDR on PCIe 3.0 x4](docs/img/lat_vs_size.svg)
+![One-way latency by verb and message size with the busy CPU cores of both hosts, 1 QP: usb4_rdma over two USB4 cables in native and DMA-BUF verbs mode vs InfiniBand FDR on PCIe 3.0 x4](docs/img/lat_vs_size.svg)
 
+Host memory, 25 October on two Bosgame M5 (InfiniBand from 30 September).
+Native mode (the default) has the lower latency up to 32 KiB, the higher
+bandwidth below 4 MiB and supports RDMA READ. DMA-BUF verbs mode
+(`dmabuf_verbs=1` with the [Strix Halo options](docs/STRIX_HALO_BOARDS.md),
+the mode Gufo uses) needs 1.3–1.9 busy cores instead of 3–8, matches native at
+4 MiB, has the lower SEND latency from 64 KiB and passes SENDs above 512 KiB,
+but has no RDMA READ and about 30 µs latency for small WRITEs and SENDs.
 How these charts are made: [bench/README.md](bench/README.md#readme-charts).
 
 ## does it do anything useful?
