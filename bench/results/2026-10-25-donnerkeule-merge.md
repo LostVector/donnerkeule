@@ -122,7 +122,16 @@ bandwidth and large exchanges, which Gufo's decode does not exercise.
 Both hosts run DKMS `thunderbolt-ibverbs/0.4.0.dk1` (this branch) with the
 AXB35 options appended to `/etc/modprobe.d/thunderbolt-ibverbs.conf`; the
 0.4.0 source stays in `/usr/src` and `scripts/rollback.sh` restores it and the
-saved options.
+saved options. Both hosts were rebooted and came up with the module, all options and
+four healthy rails without manual steps. (The first reboot still had the old
+options: the DKMS post-transaction dracut had copied `modprobe.d` into the
+initramfs before the options were appended. `install.sh` now appends them
+first; `rollback.sh` regenerates the initramfs.)
+
+Final runs through the production units after the reboot (MTP on, so within
+the noise described above): q8 42.2 / 34.1 / 23.1 decode tok/s at C=1/2/4,
+prefill 731; q4 58.7 / 48.5 / 30.6, prefill 1040. 3.0 million bulk doorbell
+calls, no credit mismatch, abort or stopped rail.
 
 ## Not covered
 
