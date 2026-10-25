@@ -65,7 +65,7 @@ struct tbv_peer {
     u64 dmabuf_rx_token;
 };
 struct tbv_dmabuf_buffer {
-    void *mr, *owner, *context;
+    void *mr, *host_mr, *owner, *context;
     int (*finish)(void *, int);
     int (*copy)(void *, u32, void *, u32, bool);
     bool (*alive)(void *);
@@ -105,6 +105,9 @@ static int tbv_control_notify(struct tbv_control *ctrl, const struct tbv_dmabuf_
     notifies++; last_notify = *m; return notify_result;
 }
 static void tbv_dmabuf_stop_rail(struct tbv_rail *r) { stops++; }
+/* Allocation/lease ownership is exercised with real cache helpers in the
+ * Framework regression suite; this shim isolates receive transitions. */
+static void tbv_dmabuf_cache_purge(struct tbv_rail *r) { (void)r; }
 static bool buffer_alive(void *ctx) { return alive; }
 static int tbv_ibdev_dmabuf_peek(struct tbv_state *s, struct tbv_rail *r,
                                 struct tbv_native_data_header *h,
