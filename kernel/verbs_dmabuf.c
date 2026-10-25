@@ -65,6 +65,7 @@ static uint dmabuf_post_burst = 16;
 module_param(dmabuf_post_burst, uint, 0444);
 MODULE_PARM_DESC(dmabuf_post_burst, "Frames posted per rail turn, 1..512; default 16");
 static atomic64_t dmabuf_bulk_calls, dmabuf_bulk_frames, dmabuf_bulk_fallback;
+static atomic64_t dmabuf_progress_ticks, dmabuf_progress_skipped;
 static bool dmabuf_coalesce_copy;
 module_param(dmabuf_coalesce_copy, bool, 0444);
 MODULE_PARM_DESC(dmabuf_coalesce_copy,
@@ -200,6 +201,8 @@ void tbv_dmabuf_debugfs_show(struct seq_file *s)
 	seq_printf(s, "dmabuf_bulk_calls: %lld\n", atomic64_read(&dmabuf_bulk_calls));
 	seq_printf(s, "dmabuf_bulk_frames: %lld\n", atomic64_read(&dmabuf_bulk_frames));
 	seq_printf(s, "dmabuf_bulk_fallback: %lld\n", atomic64_read(&dmabuf_bulk_fallback));
+	seq_printf(s, "dmabuf_progress_ticks: %lld\n", atomic64_read(&dmabuf_progress_ticks));
+	seq_printf(s, "dmabuf_progress_skipped: %lld\n", atomic64_read(&dmabuf_progress_skipped));
 	seq_printf(s, "dmabuf_rx_eager: %u\n", dmabuf_rx_eager);
 	seq_printf(s, "dmabuf_parallel_post: %u\n", dmabuf_parallel_post);
 	seq_printf(s, "dmabuf_control_ring: %u\n", tbv_control_enabled());
@@ -1341,14 +1344,22 @@ static void tbv_dmabuf_progress_work(struct work_struct *work)
 	if (READ_ONCE(dmabuf_engine.progress_stopping) ||
 	    !tbv_dmabuf_progress_active())
 		return;
-	mutex_lock(&state->lock);
+	/* A fallback tick must never queue behind the WR path that holds these
+	 * locks: whoever holds them is making progress, the next tick follows. */
+	if (!mutex_trylock(&state->lock)) {
+		atomic64_inc(&dmabuf_progress_skipped);
+		return;
+	}
 	list_for_each_entry(peer, &state->peers, node) {
 		struct tbv_rail *rail;
 
 		if (peer->backend != TBV_BACKEND_NATIVE)
 			continue;
 		list_for_each_entry(rail, &peer->rails, node) {
-			mutex_lock(&dmabuf_engine.ring_lock);
+			if (!mutex_trylock(&dmabuf_engine.ring_lock)) {
+				atomic64_inc(&dmabuf_progress_skipped);
+				continue;
+			}
 			if (!READ_ONCE(rail->removing) &&
 			    !READ_ONCE(rail->rings_stopped)) {
 				if (rail->path.tx_ring) {
@@ -1375,6 +1386,7 @@ static enum hrtimer_restart tbv_dmabuf_progress_timer(struct hrtimer *timer)
 	if (dmabuf_engine.progress_stopping || !tbv_dmabuf_progress_active()) {
 		dmabuf_engine.progress_running = false;
 	} else {
+		atomic64_inc(&dmabuf_progress_ticks);
 		queue_work(dmabuf_engine.progress_wq, &dmabuf_engine.progress_work);
 		hrtimer_forward_now(timer, ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC));
 		restart = HRTIMER_RESTART;

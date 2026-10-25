@@ -32,6 +32,8 @@ static struct {
 static bool dmabuf_verbs=true,dmabuf_poll_control=true;
 static unsigned dmabuf_poll_us=25;
 static u64 now_ns,starts,ticks,queued,canceled;
+static atomic_llong dmabuf_progress_ticks;
+#define atomic64_inc(p) atomic_fetch_add(p,1)
 static int hrtimer_start(struct hrtimer *t,u64 delta,int mode) {
     (void)mode;t->enqueued=true;t->expires=now_ns+delta;++starts;return 0;
 }
