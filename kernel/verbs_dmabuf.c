@@ -106,12 +106,13 @@ MODULE_PARM_DESC(dmabuf_credit_max, "Largest SEND length a credit pre-arms, in b
 enum tbv_dmabuf_credit_counter {
 	CREDIT_GRANTED, CREDIT_COMMITTED, CREDIT_ADOPTED, CREDIT_RELEASED,
 	CREDIT_CANCELED, CREDIT_ABORTED, CREDIT_USED, CREDIT_RETURNED,
-	CREDIT_STALE, CREDIT_MISMATCH, CREDIT_DIRECT, CREDIT_COUNTERS,
+	CREDIT_STALE, CREDIT_MISMATCH, CREDIT_DIRECT, CREDIT_READOPTED,
+	CREDIT_COUNTERS,
 };
 
 static const char * const dmabuf_credit_names[] = {
 	"granted", "committed", "adopted", "released", "canceled", "aborted",
-	"used", "returned", "stale", "mismatch", "direct",
+	"used", "returned", "stale", "mismatch", "direct", "readopted",
 };
 
 static atomic64_t dmabuf_credit_counters[CREDIT_COUNTERS];
@@ -346,6 +347,10 @@ struct tbv_dmabuf_rx {
 	int last_status;
 	/* A committed credit whose WQE was gone: fail it after its DMA. */
 	int deferred;
+	/* The credit a PREPARE adopted for this request. Every READY for it
+	 * names the credit, also one answering a retried PREPARE whose first
+	 * READY the sender never saw; otherwise the sender would RELEASE it. */
+	u32 adopted_credit;
 	enum tbv_dmabuf_rx_state state;
 	bool last_valid;
 	bool released;
@@ -1706,6 +1711,7 @@ static void tbv_dmabuf_spec_adopt(const struct tbv_dmabuf_wire *m, int deferred)
 	rx->request.credit = 0;
 	rx->request.status = 0;
 	rx->deferred = deferred;
+	rx->adopted_credit = 0;
 	rx->next_offset = 0;
 	rx->deadline = jiffies + msecs_to_jiffies(30000);
 	tbv_control_put(rx->credit_ctrl);
@@ -1966,6 +1972,7 @@ static int tbv_dmabuf_spec_prepare(struct tbv_state *state,
 		return TBV_DMABUF_BUSY;
 	}
 	tbv_dmabuf_spec_adopt(m, 0);
+	rx->adopted_credit = credit;
 	m->credit = credit;
 	tbv_dmabuf_credit_count(CREDIT_ADOPTED);
 	return TBV_DMABUF_READY;
@@ -2001,9 +2008,16 @@ static int tbv_dmabuf_rx_prepare(struct tbv_state *state,
 	if (tbv_dmabuf_rx_active(rx)) {
 		if (!tbv_dmabuf_same(&rx->request, m, false))
 			return TBV_DMABUF_BUSY;
-		if (rx->state == TBV_DMABUF_RX_ARMED)
-			return tbv_dmabuf_same(&rx->request, m, true) ?
-				TBV_DMABUF_READY : -EINVAL;
+		if (rx->state == TBV_DMABUF_RX_ARMED) {
+			if (!tbv_dmabuf_same(&rx->request, m, true))
+				return -EINVAL;
+			/* READY is 0: an adoption above also ends here. */
+			if (rx->adopted_credit && m->credit != rx->adopted_credit) {
+				m->credit = rx->adopted_credit;
+				tbv_dmabuf_credit_count(CREDIT_READOPTED);
+			}
+			return TBV_DMABUF_READY;
+		}
 		if (m->offset == rx->request.offset && m->bytes == rx->request.bytes)
 			return TBV_DMABUF_DONE;
 		if (m->offset != rx->next_offset)
@@ -2053,6 +2067,7 @@ static int tbv_dmabuf_rx_prepare(struct tbv_state *state,
 		if (ret)
 			goto drop;
 		rx->state = TBV_DMABUF_RX_OPEN;
+		rx->adopted_credit = 0;
 		mutex_lock(&state->lock);
 		{
 			struct tbv_peer *peer;
