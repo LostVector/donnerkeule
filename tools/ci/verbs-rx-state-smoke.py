@@ -39,14 +39,16 @@ struct list_head { struct list_head *next; };
 #define time_after_eq(a, b) ((long)((a) - (b)) >= 0)
 #define wake_up_all(q) ((void)(q))
 /* Waits observe the state at the call; tests stage asynchronous events. */
-#define wait_event_timeout(q, cond, t) ((void)(q), (cond) ? 1 : 0)
-#define queue_work(wq, work) (queued++, true)
+static long mock_wait_timeout(bool condition) { return condition ? 1 : 0; }
+#define wait_event_timeout(q, cond, t) ((void)(q), (void)(t), mock_wait_timeout(cond))
+#define queue_work(wq, work) mock_queue_work()
 #define pr_warn_ratelimited(...) ((void)0)
 static unsigned long jiffies;
 static bool dmabuf_verbs = true;
 static bool dmabuf_credits = true;
 static unsigned int dmabuf_credit_max = 1u << 20;
 static unsigned int queued;
+static bool mock_queue_work(void) { queued++; return true; }
 static int begin_result, alloc_result, post_result, copy_result, finish_result;
 static unsigned int begins, finishes, copies, drops, ref_gets, ref_puts, notifications;
 static int notified;
@@ -63,7 +65,7 @@ struct tbv_peer {
     u64 dmabuf_rx_token;
 };
 struct tbv_dmabuf_buffer {
-    void *mr, *owner, *context;
+    void *mr, *host_mr, *owner, *context;
     int (*finish)(void *, int);
     int (*copy)(void *, u32, void *, u32, bool);
     bool (*alive)(void *);
@@ -103,6 +105,9 @@ static int tbv_control_notify(struct tbv_control *ctrl, const struct tbv_dmabuf_
     notifies++; last_notify = *m; return notify_result;
 }
 static void tbv_dmabuf_stop_rail(struct tbv_rail *r) { stops++; }
+/* Allocation/lease ownership is exercised with real cache helpers in the
+ * Framework regression suite; this shim isolates receive transitions. */
+static void tbv_dmabuf_cache_purge(struct tbv_rail *r) { (void)r; }
 static bool buffer_alive(void *ctx) { return alive; }
 static int tbv_ibdev_dmabuf_peek(struct tbv_state *s, struct tbv_rail *r,
                                 struct tbv_native_data_header *h,
@@ -352,3 +357,10 @@ int main(void) {
 }
 """
 run_c("rx-state", shim + state + counters + rx + mocks + body + cases)
+
+# Run the same receive, failure and lifetime cases with an ordinary direct MR.
+assert mocks.count(".mr = &gpu_mr") == 1
+assert cases.count("dmabuf_engine.rx.buffer.mr = &gpu_mr") == 1
+host_mocks=mocks.replace(".mr = &gpu_mr", ".host_mr = &gpu_mr")
+host_cases=cases.replace("dmabuf_engine.rx.buffer.mr = &gpu_mr", "dmabuf_engine.rx.buffer.host_mr = &gpu_mr")
+run_c("rx-state-host", shim + state + counters + rx + host_mocks + body + host_cases)

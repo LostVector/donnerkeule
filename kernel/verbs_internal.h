@@ -12,6 +12,7 @@
 
 struct tbv_state;
 struct tbv_dmabuf_mr;
+struct seq_file;
 
 #define TBV_IBDEV_MAX_CQE 4096
 
@@ -31,6 +32,13 @@ struct tbv_cq {
 	bool overflowed;
 };
 
+struct tbv_host_dma_map {
+	struct device *dev;
+	struct sg_table sgt;
+	dma_addr_t *pages;
+	unsigned long npages;
+};
+
 struct tbv_mr {
 	struct ib_mr base;
 	struct tbv_state *owner;
@@ -43,6 +51,8 @@ struct tbv_mr {
 	 */
 	struct page **pages;
 	unsigned long npages;
+	struct mutex host_dma_lock;
+	struct tbv_host_dma_map host_dma[4];
 	refcount_t refs;
 	struct work_struct free_work;
 	u64 start;
@@ -52,6 +62,12 @@ struct tbv_mr {
 	bool closing;
 	bool dma_mr;
 };
+
+bool tbv_host_dma_eligible(struct tbv_mr *mr, u64 offset, u64 length);
+void tbv_host_dma_debugfs_show(struct seq_file *s);
+struct tbv_host_dma_map *tbv_host_dma_map(struct tbv_mr *mr, struct device *dev);
+int tbv_host_dma_address(struct tbv_mr *mr, struct tbv_host_dma_map *map,
+			 u64 offset, u32 bytes, dma_addr_t *address);
 
 struct tbv_state *tbv_ibdev_state(struct ib_device *ibdev);
 enum tbv_backend_type tbv_ibdev_backend(struct ib_device *ibdev);

@@ -103,6 +103,10 @@ static struct ibv_cq *usb4_rdma_create_cq(struct ibv_context *ctx, int num_cqe,
 		errno = rv;
 		return NULL;
 	}
+	/* The native kernel allocates exactly num_cqe, but older builds leave
+	 * the public CQ capacity zero. Report the successfully allocated size. */
+	if (!cq->cqe)
+		cq->cqe = num_cqe;
 	return cq;
 }
 

@@ -5,11 +5,14 @@
 #include "../proto/verbs_dmabuf.h"
 
 struct tbv_dmabuf_mr;
+struct tbv_mr;
 struct seq_file;
 
 /* The verbs layer holds QP/MR references until finish, including failures. */
 struct tbv_dmabuf_buffer {
 	struct tbv_dmabuf_mr *mr;
+	struct tbv_mr *host_mr;
+	bool uncached; /* Internal credit filler; never part of the wire ABI. */
 	u64 offset;
 	u64 wr_id; /* Local profiling correlation only; never added to the wire. */
 	void *owner;
@@ -19,6 +22,7 @@ struct tbv_dmabuf_buffer {
 	int (*finish)(void *context, int status);
 };
 
+void tbv_dmabuf_progress_arm(void);
 bool tbv_dmabuf_verbs_enabled(void);
 bool tbv_dmabuf_credits_enabled(void);
 void tbv_dmabuf_recv_posted(void *owner);
@@ -40,6 +44,7 @@ int tbv_dmabuf_submit(struct tbv_state *state, struct tbv_rail *rail,
 		       const struct tbv_native_data_header *hdr,
 		       const struct tbv_dmabuf_buffer *buffer, u8 retries,
 		       u8 rnr_retries, unsigned long timeout);
+bool tbv_dmabuf_rail_ready(struct tbv_rail *rail);
 
 int tbv_ibdev_dmabuf_begin(struct tbv_state *state, struct tbv_rail *rail,
 			    const struct tbv_native_data_header *hdr,

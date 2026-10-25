@@ -439,6 +439,10 @@ build. For two cables between two Strix Halo hosts:
 profile=linux_perf tbnet=prefer_rdma lanes=2 register_verbs=1 native_write_striping=1
 ```
 
+Board notes (Sixunited AXB35 such as the Bosgame M5, and the Framework
+Desktop) and the opt-in DMA-BUF tuning options for both are in
+[docs/STRIX_HALO_BOARDS.md](docs/STRIX_HALO_BOARDS.md).
+
 Example: tensor parallelism (TP=2) of [gufo](https://github.com/gufo-org/gufo)
 over two cables, with its RDMA transport from the `rdma` branch of
 [neuhaus/gufo](https://github.com/neuhaus/gufo/tree/rdma) (upstream in review).

@@ -51,7 +51,15 @@ struct tbv_dmabuf_post_group {
     u64 perf_queued_ns;
 };
 static unsigned posts, fail_at, seen[4096];
+static unsigned dmabuf_post_burst = 16;
 static bool tbv_dmabuf_rail_ready(struct tbv_rail *r) { return r->ready; }
+/* This harness exercises ordinary posting after a bulk fallback. The real
+ * bulk helper is compiled and executed by framework-desktop-smoke.py. */
+static int tbv_dmabuf_post_bulk(struct tbv_dmabuf_lane *lane, bool tx,
+                               u32 first, u32 count) {
+    (void)tx;assert(first <= lane->count && count <= lane->count-first);
+    return -EAGAIN;
+}
 static int post(struct tb_ring *r, struct ring_frame *f) {
     if (posts == fail_at) return -EIO;
     assert(f->index == r->next++);
@@ -91,15 +99,17 @@ static void check(bool tx, unsigned a, unsigned b, unsigned fail, bool ready) {
     assert(group.status == 0 && posts == a+b);
     assert(rings[0].next == a && rings[2].next == b);
     /* Neither populated sibling may wait for the other's entire long batch. */
-    if (a > 32 && b > 32) {
+    if (a > dmabuf_post_burst && b > dmabuf_post_burst) {
         unsigned mask=0;
-        for (unsigned i=0; i<32; i++) mask |= 1u << seen[i];
+        for (unsigned i=0; i<2*dmabuf_post_burst; i++) mask |= 1u << seen[i];
         assert(mask == ((1u<<0) | (1u<<2)));
     }
 }
 int main(void) {
     unsigned lengths[] = {0,1,15,16,17,31,32,33,511,512};
-    for (unsigned tx=0; tx<2; tx++)
+    for (unsigned burst=16; burst<=128; burst*=2) {
+      dmabuf_post_burst=burst;
+      for (unsigned tx=0; tx<2; tx++)
         for (unsigned i=0; i<10; i++)
             for (unsigned j=0; j<10; j++) {
                 check(tx,lengths[i],lengths[j],4096,true);
@@ -107,7 +117,8 @@ int main(void) {
                 check(tx,lengths[i],lengths[j],17,true);
                 check(tx,lengths[i],lengths[j],4096,false);
             }
-    puts("Verbs posting: PASS (per-ring order, sibling progress, tails, NHI isolation, errors, counters)");
+    }
+    puts("Verbs posting: PASS (per-ring order, sibling progress, tails, NHI isolation, errors, counters, 16..128 bursts)");
 }
 '''
 run_c('verbs-post', shim + body + cases)

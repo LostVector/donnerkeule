@@ -88,6 +88,11 @@ module_param(roce_netdev, charp, 0444);
 MODULE_PARM_DESC(roce_netdev,
 		 "Netdev used for RoCE GID metadata, for example br0.lan");
 
+static bool dmabuf_host_credits;
+module_param(dmabuf_host_credits, bool, 0444);
+MODULE_PARM_DESC(dmabuf_host_credits,
+                 "Pre-arm SEND credits for eligible aligned host MRs (default off)");
+
 const char *tbv_ibdev_roce_netdev_name(void)
 {
 	return roce_netdev;
@@ -411,6 +416,7 @@ struct tbv_qp {
 	 */
 	struct mutex ack_lock;
 	struct mutex post_lock;
+	bool dmabuf_draining;
 	wait_queue_head_t credit_wait;
 	wait_queue_head_t apple_tx_wait;
 	wait_queue_head_t refs_wait;
@@ -1848,7 +1854,8 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 		u32 pending;
 		u32 rr_distance;
 
-		if (!tbv_rail_data_ready(rail) || rail->removing)
+		if (!tbv_rail_data_ready(rail) || rail->removing ||
+		    (tbv_dmabuf_verbs_enabled() && !tbv_dmabuf_rail_ready(rail)))
 			continue;
 		if (!READ_ONCE(rail->ibdev))
 			continue;
@@ -2309,6 +2316,15 @@ static int tbv_get_port_immutable(struct ib_device *ibdev, u32 port_num,
 	immutable->gid_tbl_len = attr.gid_tbl_len;
 	immutable->core_cap_flags = RDMA_CORE_PORT_IBA_ROCE_UDP_ENCAP;
 	immutable->max_mad_size = IB_MGMT_MAD_SIZE;
+	/* DMA-BUF verbs accepts RC QPs only, so kernel MAD/GSI and IB CM
+	 * clients cannot operate on these ports. Keep the RoCE addressing
+	 * and GID capabilities while avoiding unsupported QP1 creation.
+	 */
+	if (tbv_dmabuf_verbs_enabled()) {
+		immutable->core_cap_flags &= ~(RDMA_CORE_CAP_IB_MAD |
+					     RDMA_CORE_CAP_IB_CM);
+		immutable->max_mad_size = 0;
+	}
 	return 0;
 }
 
@@ -2660,11 +2676,46 @@ static int tbv_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *init_attr,
 		mutex_unlock(&state->lock);
 	}
 	atomic_inc(&tqp->owner->verbs_qps);
+	tbv_dmabuf_progress_arm();
 	return 0;
 
 err_put_rail:
 	tbv_qp_unbind_rail(tqp);
 	return ret;
+}
+
+/* Timed tools can destroy a QP with a full SQ. A healthy close first drains
+ * accepted work, leaving incoming requests alive until the peer becomes quiet.
+ * The raw-frame cancellation path still quarantines a truly interrupted DMA.
+ * New local posts are serialized out; existing callbacks retain their refs. */
+static void tbv_dmabuf_drain_qp(struct tbv_qp *tqp)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(2000), quiet = 0;
+	u64 start = tbv_perf_clock();
+	struct tbv_perf_id perf = { .src_qp = tqp->base.qp_num };
+	int ret = -ETIMEDOUT;
+
+	if (!tbv_dmabuf_verbs_enabled())
+		return;
+	mutex_lock(&tqp->post_lock);
+	WRITE_ONCE(tqp->dmabuf_draining, true);
+	mutex_unlock(&tqp->post_lock);
+	while (time_before(jiffies, deadline)) {
+		if (READ_ONCE(tqp->state) == IB_QPS_ERR || READ_ONCE(tqp->closing))
+			break;
+		if (!READ_ONCE(tqp->sendq_count) && refcount_read(&tqp->refs) == 1) {
+			if (!quiet)
+				quiet = jiffies + msecs_to_jiffies(100);
+			if (time_after_eq(jiffies, quiet)) {
+				ret = 0;
+				break;
+			}
+		} else {
+			quiet = 0;
+		}
+		msleep(5);
+	}
+	tbv_perf_span(&perf, "qp_drain", start, ret, READ_ONCE(tqp->sendq_count));
 }
 
 static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
@@ -2675,6 +2726,7 @@ static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
 	u32 pending;
 	u32 i;
 
+	tbv_dmabuf_drain_qp(tqp);
 	spin_lock_irqsave(&tqp->lock, flags);
 	tqp->closing = true;
 	spin_unlock_irqrestore(&tqp->lock, flags);
@@ -5456,7 +5508,7 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 	bool write_with_imm = wr->opcode == IB_WR_RDMA_WRITE_WITH_IMM;
 	int ret;
 
-	if (!tbv_qp_allows_post(tqp))
+	if (READ_ONCE(tqp->dmabuf_draining) || !tbv_qp_allows_post(tqp))
 		return -EINVAL;
 
 	if (tqp->type == IB_QPT_GSI)
@@ -9634,6 +9686,10 @@ static int tbv_dmabuf_post_send(struct tbv_send_ctx *ctx)
 		buffer.mr = ctx->segs[0].mr->dmabuf;
 		buffer.offset = ctx->segs[0].addr - ctx->segs[0].mr->start;
 		atomic64_inc(&ctx->tqp->owner->data_wr_zcopy);
+	} else if (ctx->nsegs == 1 && tbv_host_dma_eligible(ctx->segs[0].mr,
+		   ctx->segs[0].addr - ctx->segs[0].mr->start, ctx->total_len)) {
+		buffer.host_mr = ctx->segs[0].mr;
+		buffer.offset = ctx->segs[0].addr - ctx->segs[0].mr->start;
 	} else {
 		atomic64_inc(&ctx->tqp->owner->data_wr_copied);
 	}
@@ -9799,6 +9855,8 @@ int tbv_ibdev_dmabuf_begin(struct tbv_state *state, struct tbv_rail *rail,
 		.alive = tbv_dmabuf_recv_alive,
 		.finish = tbv_dmabuf_recv_finish,
 	};
+	if (tbv_host_dma_eligible(ctx->mr, buffer->offset, hdr->length))
+		buffer->host_mr = ctx->mr;
 	mutex_unlock(&tqp->rx_lock);
 	return 0;
 fail:
@@ -9814,7 +9872,7 @@ fail:
 }
 
 /*
- * Pre-arm the head receive WQE of a GPU SEND stream. Validates exactly as
+ * Pre-arm the head receive WQE of a GPU or opted-in direct host SEND stream. Validates exactly as
  * tbv_ibdev_dmabuf_begin() for a SEND of hdr->length at the QP's expected
  * PSN, which it returns in hdr->psn, but leaves the WQE posted. Returns
  * -EAGAIN with buffer->owner set (no reference) when the RQ is empty.
@@ -9861,7 +9919,7 @@ int tbv_ibdev_dmabuf_peek(struct tbv_state *state, struct tbv_rail *rail,
 	ctx->hdr = *hdr;
 	ctx->peeked = true;
 	ctx->mr = tbv_mr_get(state, ctx->wqe.lkey);
-	if (!ctx->mr || !ctx->mr->dmabuf || ctx->mr->base.pd != tqp->base.pd ||
+	if (!ctx->mr || ctx->mr->dma_mr || ctx->mr->base.pd != tqp->base.pd ||
 	    !(ctx->mr->access & IB_ACCESS_LOCAL_WRITE) ||
 	    hdr->length % 32 || ALIGN(hdr->length, SZ_4K) > ctx->wqe.length)
 		goto fail;
@@ -9871,8 +9929,18 @@ int tbv_ibdev_dmabuf_peek(struct tbv_state *state, struct tbv_rail *rail,
 	    ctx->address < ctx->mr->virt_addr || end > mr_end ||
 	    (ctx->address - ctx->mr->virt_addr) % SZ_4K)
 		goto fail;
+	/* Ordinary pages may be armed only through the direct-host DMA path.
+	 * Its eligibility check keeps page alignment, pinned-page ownership,
+	 * bounded MR size and full logical-length bounds. Staging is never
+	 * speculative: it would need a separate lease from a running TX. */
+	if (!ctx->mr->dmabuf &&
+	    (!dmabuf_host_credits ||
+	     !tbv_host_dma_eligible(ctx->mr, ctx->address - ctx->mr->virt_addr,
+	                           hdr->length)))
+		goto fail;
 	*buffer = (struct tbv_dmabuf_buffer) {
 		.mr = ctx->mr->dmabuf,
+		.host_mr = ctx->mr->dmabuf ? NULL : ctx->mr,
 		.offset = ctx->address - ctx->mr->virt_addr,
 		.owner = tqp,
 		.context = ctx,

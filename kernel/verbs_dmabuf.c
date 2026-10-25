@@ -8,6 +8,10 @@
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
+#include <linux/hrtimer.h>
+#include <linux/io.h>
+#include <linux/pci.h>
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
 #include <linux/seq_file.h>
@@ -19,6 +23,7 @@
 
 #include "tbv.h"
 #include "verbs_dmabuf.h"
+#include "verbs_internal.h"
 #include "verbs_control.h"
 #include "perf.h"
 
@@ -30,6 +35,48 @@ MODULE_PARM_DESC(dmabuf_verbs,
 static bool dmabuf_index = true;
 module_param(dmabuf_index, bool, 0444);
 MODULE_PARM_DESC(dmabuf_index, "Index DMA-BUF frame addresses once per NHI attachment");
+
+/* Optional bounded progress for NHIs whose completion IRQ can be missed.
+ * Use the ordinary serialized ring worker; never consume descriptors here. */
+static uint dmabuf_poll_us;
+module_param(dmabuf_poll_us, uint, 0444);
+MODULE_PARM_DESC(dmabuf_poll_us,
+	"Descriptor ring progress interval in microseconds; 0 keeps IRQ/10ms watchdog behavior");
+
+static bool dmabuf_poll_control;
+module_param(dmabuf_poll_control, bool, 0444);
+MODULE_PARM_DESC(dmabuf_poll_control,
+	"Also progress existing XDomain control rings while a verbs QP exists; requires dmabuf_poll_us");
+
+/*
+ * Opt-in for the AMD 158d/158e NHI ring ABI. The tb_ring layout is checked at
+ * build time; it was qualified on Linux 7.2.6 (Ubuntu, Framework Desktop) and
+ * 7.2.11 (Fedora, Sixunited AXB35 / Bosgame M5). Other kernels compile it out.
+ */
+#if defined(CONFIG_X86_64) && LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
+#define TBV_BULK_NHI_ABI 1
+#endif
+static bool dmabuf_batch_doorbell;
+module_param(dmabuf_batch_doorbell, bool, 0444);
+MODULE_PARM_DESC(dmabuf_batch_doorbell,
+	"Publish a data-ring descriptor group with one MMIO doorbell on AMD 158d/158e NHIs (Linux 7.2.x)");
+static uint dmabuf_post_burst = 16;
+module_param(dmabuf_post_burst, uint, 0444);
+MODULE_PARM_DESC(dmabuf_post_burst, "Frames posted per rail turn, 1..512; default 16");
+static atomic64_t dmabuf_bulk_calls, dmabuf_bulk_frames, dmabuf_bulk_fallback;
+static atomic64_t dmabuf_progress_ticks, dmabuf_progress_skipped;
+static bool dmabuf_coalesce_copy;
+module_param(dmabuf_coalesce_copy, bool, 0444);
+MODULE_PARM_DESC(dmabuf_coalesce_copy,
+	"Copy each host-staged TX lane once instead of once per 4 KiB frame");
+static atomic64_t dmabuf_copy_chunks, dmabuf_copy_bytes;
+static bool dmabuf_reuse_buffers;
+module_param(dmabuf_reuse_buffers, bool, 0444);
+MODULE_PARM_DESC(dmabuf_reuse_buffers,
+	"Cache one drained descriptor/staging batch per rail and direction (opt-in)");
+static atomic64_t dmabuf_cache_hits, dmabuf_cache_misses, dmabuf_cache_bytes;
+static atomic64_t dmabuf_host_tx_frames, dmabuf_host_rx_frames;
 
 static bool dmabuf_profile;
 module_param(dmabuf_profile, bool, 0444);
@@ -60,12 +107,13 @@ MODULE_PARM_DESC(dmabuf_credit_max, "Largest SEND length a credit pre-arms, in b
 enum tbv_dmabuf_credit_counter {
 	CREDIT_GRANTED, CREDIT_COMMITTED, CREDIT_ADOPTED, CREDIT_RELEASED,
 	CREDIT_CANCELED, CREDIT_ABORTED, CREDIT_USED, CREDIT_RETURNED,
-	CREDIT_STALE, CREDIT_MISMATCH, CREDIT_DIRECT, CREDIT_COUNTERS,
+	CREDIT_STALE, CREDIT_MISMATCH, CREDIT_DIRECT, CREDIT_READOPTED,
+	CREDIT_COUNTERS,
 };
 
 static const char * const dmabuf_credit_names[] = {
 	"granted", "committed", "adopted", "released", "canceled", "aborted",
-	"used", "returned", "stale", "mismatch", "direct",
+	"used", "returned", "stale", "mismatch", "direct", "readopted",
 };
 
 static atomic64_t dmabuf_credit_counters[CREDIT_COUNTERS];
@@ -139,6 +187,22 @@ void tbv_dmabuf_debugfs_show(struct seq_file *s)
 	seq_printf(s, "dmabuf_verbs: %u\n", dmabuf_verbs);
 	seq_printf(s, "dmabuf_index: %u\n", dmabuf_index);
 	seq_printf(s, "dmabuf_profile: %u\n", dmabuf_profile);
+	seq_printf(s, "dmabuf_reuse_buffers: %u\n", dmabuf_reuse_buffers);
+	seq_printf(s, "dmabuf_cache_hits: %lld\n", atomic64_read(&dmabuf_cache_hits));
+	seq_printf(s, "dmabuf_cache_misses: %lld\n", atomic64_read(&dmabuf_cache_misses));
+	seq_printf(s, "dmabuf_cache_bytes: %lld\n", atomic64_read(&dmabuf_cache_bytes));
+	seq_printf(s, "dmabuf_host_tx_frames: %lld\n", atomic64_read(&dmabuf_host_tx_frames));
+	seq_printf(s, "dmabuf_host_rx_frames: %lld\n", atomic64_read(&dmabuf_host_rx_frames));
+	seq_printf(s, "dmabuf_coalesce_copy: %u\n", dmabuf_coalesce_copy);
+	seq_printf(s, "dmabuf_copy_chunks: %lld\n", atomic64_read(&dmabuf_copy_chunks));
+	seq_printf(s, "dmabuf_copy_bytes: %lld\n", atomic64_read(&dmabuf_copy_bytes));
+	seq_printf(s, "dmabuf_batch_doorbell: %u\n", dmabuf_batch_doorbell);
+	seq_printf(s, "dmabuf_post_burst: %u\n", dmabuf_post_burst);
+	seq_printf(s, "dmabuf_bulk_calls: %lld\n", atomic64_read(&dmabuf_bulk_calls));
+	seq_printf(s, "dmabuf_bulk_frames: %lld\n", atomic64_read(&dmabuf_bulk_frames));
+	seq_printf(s, "dmabuf_bulk_fallback: %lld\n", atomic64_read(&dmabuf_bulk_fallback));
+	seq_printf(s, "dmabuf_progress_ticks: %lld\n", atomic64_read(&dmabuf_progress_ticks));
+	seq_printf(s, "dmabuf_progress_skipped: %lld\n", atomic64_read(&dmabuf_progress_skipped));
 	seq_printf(s, "dmabuf_rx_eager: %u\n", dmabuf_rx_eager);
 	seq_printf(s, "dmabuf_parallel_post: %u\n", dmabuf_parallel_post);
 	seq_printf(s, "dmabuf_control_ring: %u\n", tbv_control_enabled());
@@ -191,8 +255,18 @@ struct tbv_dmabuf_frame {
 	u8 eof;
 };
 
+struct tbv_dmabuf_cache {
+	struct tbv_dmabuf_frame *frames;
+	struct device *dev;
+	void *staging;
+	dma_addr_t staging_dma;
+	bool leased, invalid;
+};
+
 struct tbv_dmabuf_lane {
 	struct tbv_rail *rail;
+	struct tbv_dmabuf_cache *cache;
+	struct tbv_host_dma_map *host_map;
 	struct tbv_dmabuf_frame *frames;
 	struct device *dev;
 	void *staging;
@@ -276,6 +350,10 @@ struct tbv_dmabuf_rx {
 	int last_status;
 	/* A committed credit whose WQE was gone: fail it after its DMA. */
 	int deferred;
+	/* The credit a PREPARE adopted for this request. Every READY for it
+	 * names the credit, also one answering a retried PREPARE whose first
+	 * READY the sender never saw; otherwise the sender would RELEASE it. */
+	u32 adopted_credit;
 	enum tbv_dmabuf_rx_state state;
 	bool last_valid;
 	bool released;
@@ -299,8 +377,15 @@ struct tbv_dmabuf_credit {
 /* One ordered TX stream and one RX transaction span all rails/links.
  * ring_lock serializes ring replacement; tx_lock protects cancellation. */
 struct tbv_dmabuf_engine {
-	struct workqueue_struct *tx_wq, *post_wq;
+	struct workqueue_struct *tx_wq, *post_wq, *progress_wq;
+	struct hrtimer progress_timer;
+	struct work_struct progress_work;
+	atomic_t progress_batches;
+	spinlock_t progress_lock;
+	bool progress_running;
+	bool progress_stopping;
 	struct mutex rx_lock, ring_lock, tx_lock;
+	struct mutex cache_lock;
 	/* Orders submissions with direct posting: queued or running TX jobs. */
 	struct mutex submit_lock;
 	atomic_t tx_jobs;
@@ -330,8 +415,11 @@ static struct tbv_dmabuf_engine dmabuf_engine = {
 	.rx_lock = __MUTEX_INITIALIZER(dmabuf_engine.rx_lock),
 	.ring_lock = __MUTEX_INITIALIZER(dmabuf_engine.ring_lock),
 	.tx_lock = __MUTEX_INITIALIZER(dmabuf_engine.tx_lock),
+	.cache_lock = __MUTEX_INITIALIZER(dmabuf_engine.cache_lock),
 	.submit_lock = __MUTEX_INITIALIZER(dmabuf_engine.submit_lock),
 	.tx_jobs = ATOMIC_INIT(0),
+	.progress_batches = ATOMIC_INIT(0),
+	.progress_lock = __SPIN_LOCK_UNLOCKED(dmabuf_engine.progress_lock),
 	.token = ATOMIC64_INIT(0),
 	.rx_wait = __WAIT_QUEUE_HEAD_INITIALIZER(dmabuf_engine.rx_wait),
 	.credit_lock = __SPIN_LOCK_UNLOCKED(dmabuf_engine.credit_lock),
@@ -549,17 +637,116 @@ out:
 /* Raw frames have no operation identifier. A failed batch quarantines both
  * directions until the physical connection/module is recreated. Draining
  * precedes every release of frame metadata, mappings and verbs references. */
+/* cache_lock protects ownership only. It is never held while draining rings. */
+static void tbv_dmabuf_cache_free(struct tbv_dmabuf_cache *cache)
+{
+	if (cache->staging) {
+		dma_free_coherent(cache->dev, SZ_2M, cache->staging, cache->staging_dma);
+		atomic64_sub(SZ_2M, &dmabuf_cache_bytes);
+	}
+	kfree(cache->frames);
+	put_device(cache->dev);
+	kfree(cache);
+}
+
+static void tbv_dmabuf_cache_purge(struct tbv_rail *rail)
+{
+	unsigned int i;
+
+	mutex_lock(&dmabuf_engine.cache_lock);
+	for (i = 0; i < 2; i++) {
+		struct tbv_dmabuf_cache *cache = rail->dmabuf_cache[i];
+
+		if (!cache)
+			continue;
+		cache->invalid = true;
+		if (!cache->leased) {
+			rail->dmabuf_cache[i] = NULL;
+			tbv_dmabuf_cache_free(cache);
+		}
+	}
+	mutex_unlock(&dmabuf_engine.cache_lock);
+}
+
+static int tbv_dmabuf_cache_get(struct tbv_dmabuf_lane *lane, bool tx, bool host)
+{
+	struct tbv_dmabuf_cache **slot = &lane->rail->dmabuf_cache[tx];
+	struct tbv_dmabuf_cache *cache;
+	int ret = 0;
+
+	mutex_lock(&dmabuf_engine.cache_lock);
+	cache = *slot;
+	if (cache && (cache->leased || cache->invalid)) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (!cache) {
+		cache = kzalloc(sizeof(*cache), GFP_KERNEL);
+		if (!cache) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		cache->dev = get_device(lane->dev);
+		cache->frames = kcalloc(TBV_DMABUF_BATCH_FRAMES, sizeof(*cache->frames), GFP_KERNEL);
+		if (!cache->frames) {
+			tbv_dmabuf_cache_free(cache);
+			ret = -ENOMEM;
+			goto out;
+		}
+		*slot = cache;
+		atomic64_inc(&dmabuf_cache_misses);
+	} else {
+		atomic64_inc(&dmabuf_cache_hits);
+	}
+	if (host && !cache->staging) {
+		cache->staging = dma_alloc_coherent(lane->dev, SZ_2M, &cache->staging_dma, GFP_KERNEL);
+		if (!cache->staging) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		atomic64_add(SZ_2M, &dmabuf_cache_bytes);
+	}
+	cache->leased = true;
+	lane->cache = cache;
+	lane->frames = cache->frames;
+	memset(lane->frames, 0, TBV_DMABUF_BATCH_FRAMES * sizeof(*lane->frames));
+	if (host) {
+		lane->staging = cache->staging;
+		lane->staging_dma = cache->staging_dma;
+		lane->staging_bytes = lane->count * TBV_DMABUF_FRAME_BYTES;
+	}
+out:
+	mutex_unlock(&dmabuf_engine.cache_lock);
+	return ret;
+}
+
+static void tbv_dmabuf_cache_put(struct tbv_dmabuf_lane *lane, bool abort, bool tx)
+{
+	struct tbv_dmabuf_cache *cache = lane->cache;
+
+	mutex_lock(&dmabuf_engine.cache_lock);
+	cache->leased = false;
+	if (abort || cache->invalid) {
+		lane->rail->dmabuf_cache[tx] = NULL;
+		tbv_dmabuf_cache_free(cache);
+	}
+	mutex_unlock(&dmabuf_engine.cache_lock);
+}
+
 static void tbv_dmabuf_stop_rail(struct tbv_rail *rail)
 {
 	mutex_lock(&dmabuf_engine.ring_lock);
 	if (!READ_ONCE(rail->rings_stopped)) {
 		WRITE_ONCE(rail->rings_stopped, true);
+		if (!READ_ONCE(rail->dmabuf_quarantine_reason))
+			WRITE_ONCE(rail->dmabuf_quarantine_reason, 1);
 		tb_ring_stop(rail->path.tx_ring);
 		tb_ring_stop(rail->path.rx_ring);
-		pr_warn_ratelimited("rail %#x stopped after a data error or abort; recreate the connection to use it again\n",
-				    rail->rail_id);
+		pr_warn_ratelimited("rail %#x stopped after a data error or abort (reason %d); recreate the connection to use it again\n",
+				    rail->rail_id, rail->dmabuf_quarantine_reason);
 	}
 	mutex_unlock(&dmabuf_engine.ring_lock);
+	tbv_dmabuf_cache_purge(rail);
 }
 
 /* Reboot/poweroff: stop the rail's data rings before the NHI's own shutdown
@@ -612,13 +799,20 @@ static void tbv_dmabuf_batch_drop(struct tbv_dmabuf_batch *batch, bool abort)
 				flush_work(&ring->work);
 			}
 		}
-		if (lane->staging)
+		if (lane->host_map)
+			dma_sync_sgtable_for_cpu(lane->dev, &lane->host_map->sgt, DMA_BIDIRECTIONAL);
+		if (lane->cache)
+			tbv_dmabuf_cache_put(lane, abort, batch->tx);
+		else if (lane->staging)
 			dma_free_coherent(lane->dev, lane->staging_bytes,
 					  lane->staging, lane->staging_dma);
-		kfree(lane->frames);
+		if (!lane->cache)
+			kfree(lane->frames);
 		if (lane->rail)
 			tbv_rail_put(lane->rail);
 	}
+	if (dmabuf_poll_us && batch->submitted)
+		atomic_dec(&dmabuf_engine.progress_batches);
 	memset(batch, 0, sizeof(*batch));
 	tbv_dmabuf_record(tx ? TBV_DMABUF_TX_RELEASE : TBV_DMABUF_RX_RELEASE, start);
 	tbv_perf_span(&perf, "batch_release", perf_start, abort ? -ECANCELED : 0, 0);
@@ -632,12 +826,14 @@ void tbv_dmabuf_cancel(void *context)
 		return;
 	mutex_lock(&dmabuf_engine.tx_lock);
 	if (dmabuf_engine.active_context == context && dmabuf_engine.active_batch)
-		for (i = 0; i < dmabuf_engine.active_batch->count; i++)
+		for (i = 0; i < dmabuf_engine.active_batch->count; i++) {
+			WRITE_ONCE(dmabuf_engine.active_batch->lanes[i].rail->dmabuf_quarantine_reason, 2);
 			tbv_dmabuf_stop_rail(dmabuf_engine.active_batch->lanes[i].rail);
+		}
 	mutex_unlock(&dmabuf_engine.tx_lock);
 }
 
-static bool tbv_dmabuf_rail_ready(struct tbv_rail *rail)
+bool tbv_dmabuf_rail_ready(struct tbv_rail *rail)
 {
 	return rail->peer->backend == TBV_BACKEND_NATIVE &&
 		!READ_ONCE(rail->removing) && !READ_ONCE(rail->rings_stopped) &&
@@ -709,6 +905,33 @@ static void tbv_dmabuf_complete(struct tb_ring *ring, struct ring_frame *frame,
 	}
 }
 
+/* A credit RELEASE may nest inside an ordinary TX batch which already leases
+ * the rail cache. Its bounded filler must own private metadata/staging; it must
+ * never steal, clear, or wait for the outer batch's lease. The ordered TX queue
+ * permits at most one such filler (at most dmabuf_credit_max bytes) at a time. */
+static int tbv_dmabuf_lane_alloc(struct tbv_dmabuf_lane *lane,
+			       const struct tbv_dmabuf_buffer *buffer, bool tx)
+{
+	if (dmabuf_reuse_buffers && !buffer->uncached) {
+		int ret = tbv_dmabuf_cache_get(lane, tx, !buffer->mr && !buffer->host_mr);
+
+		if (ret)
+			return ret;
+	} else {
+		lane->frames = kcalloc(lane->count, sizeof(*lane->frames), GFP_KERNEL);
+		if (!lane->frames)
+			return -ENOMEM;
+	}
+	if (!buffer->mr && !buffer->host_mr && !lane->cache) {
+		lane->staging_bytes = lane->count * TBV_DMABUF_FRAME_BYTES;
+		lane->staging = dma_alloc_coherent(lane->dev, lane->staging_bytes,
+						   &lane->staging_dma, GFP_KERNEL);
+		if (!lane->staging)
+			return -ENOMEM;
+	}
+	return 0;
+}
+
 static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 				  const struct tbv_dmabuf_wire *m,
 				  const struct tbv_dmabuf_buffer *buffer, bool tx)
@@ -741,16 +964,22 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 			return -ENODEV;
 		if (!lane->count)
 			continue;
+		if (buffer->host_mr) {
+			lane->host_map = tbv_host_dma_map(buffer->host_mr, lane->dev);
+			if (IS_ERR(lane->host_map)) {
+				int ret = PTR_ERR(lane->host_map);
+
+				lane->host_map = NULL;
+				return ret;
+			}
+			dma_sync_sgtable_for_device(lane->dev, &lane->host_map->sgt, DMA_BIDIRECTIONAL);
+		}
 		perf_start = tbv_perf_clock();
-		lane->frames = kcalloc(lane->count, sizeof(*lane->frames), GFP_KERNEL);
-		if (!lane->frames)
-			return -ENOMEM;
-		if (!buffer->mr) {
-			lane->staging_bytes = lane->count * TBV_DMABUF_FRAME_BYTES;
-			lane->staging = dma_alloc_coherent(lane->dev, lane->staging_bytes,
-							   &lane->staging_dma, GFP_KERNEL);
-			if (!lane->staging)
-				return -ENOMEM;
+		{
+			int ret = tbv_dmabuf_lane_alloc(lane, buffer, tx);
+
+			if (ret)
+				return ret;
 		}
 		tbv_perf_span(&lane->perf, "lane_alloc", perf_start, 0, lane->count);
 		perf_start = tbv_perf_clock();
@@ -777,10 +1006,16 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 					&f->frame.buffer_phy);
 				if (ret)
 					return ret;
+			} else if (buffer->host_mr) {
+				ret = tbv_host_dma_address(buffer->host_mr, lane->host_map,
+					buffer->offset + m->offset + offset,
+					TBV_DMABUF_FRAME_BYTES, &f->frame.buffer_phy);
+				if (ret)
+					return ret;
 			} else {
 				f->frame.buffer_phy = lane->staging_dma +
 					n * TBV_DMABUF_FRAME_BYTES;
-				if (tx) {
+				if (tx && !dmabuf_coalesce_copy) {
 					ret = buffer->copy(buffer->context, m->offset + offset,
 						lane->staging + n * TBV_DMABUF_FRAME_BYTES,
 						f->bytes, false);
@@ -789,7 +1024,22 @@ static int tbv_dmabuf_batch_alloc_impl(struct tbv_dmabuf_batch *batch,
 				}
 			}
 		}
+	/* The lane covers a contiguous, validated slice of the same WR.
+	 * Copy only its payload, retaining the existing per-MR bounds checks. */
+	if (tx && !buffer->mr && !buffer->host_mr && dmabuf_coalesce_copy) {
+		u32 offset = lane->first * TBV_DMABUF_FRAME_BYTES;
+		u32 bytes = min_t(u32, lane->staging_bytes, m->bytes - offset);
+		int ret = buffer->copy(buffer->context, m->offset + offset,
+			lane->staging, bytes, false);
+
+		if (ret)
+			return ret;
+		atomic64_inc(&dmabuf_copy_chunks);
+		atomic64_add(bytes, &dmabuf_copy_bytes);
+	}
 		tbv_perf_span(&lane->perf, "lane_build", perf_start, 0, lane->count);
+		if (buffer->host_mr)
+			atomic64_add(lane->count, tx ? &dmabuf_host_tx_frames : &dmabuf_host_rx_frames);
 	}
 	return 0;
 }
@@ -810,6 +1060,109 @@ static int tbv_dmabuf_batch_alloc(struct tbv_dmabuf_batch *batch,
 	return ret;
 }
 
+/*
+ * Optional data-ring publication for AMD 158d/158e NHIs (TBV_BULK_NHI_ABI).
+ * The ordinary Thunderbolt worker still owns completion and cancellation.
+ * No control-channel ring or GPU-direct polling ring uses this helper.
+ */
+struct tbv_bulk_desc {
+	__le64 address;
+	__le32 metadata;
+	__le32 timestamp;
+};
+
+static int tbv_dmabuf_post_bulk(struct tbv_dmabuf_lane *lane, bool tx,
+			       u32 first, u32 count)
+{
+	struct tb_ring *ring = tx ? lane->rail->path.tx_ring : lane->rail->path.rx_ring;
+	struct tbv_bulk_desc *descs;
+	struct pci_dev *pdev;
+	unsigned long irqflags;
+	u32 n, head, available;
+	void __iomem *doorbell;
+
+	if (!dmabuf_batch_doorbell || count < 2)
+		return -EAGAIN;
+#ifndef TBV_BULK_NHI_ABI
+	return -EOPNOTSUPP;
+#else
+	BUILD_BUG_ON(sizeof(struct tbv_bulk_desc) != 16);
+	BUILD_BUG_ON(sizeof(struct tb_ring) != 184);
+	BUILD_BUG_ON(offsetof(struct tb_ring, descriptors) != 32);
+	BUILD_BUG_ON(offsetof(struct tb_ring, in_flight) != 64);
+#endif
+	if (first > lane->count || count > lane->count - first)
+		return -EINVAL;
+	if (!dev_is_pci(ring->nhi->dev))
+		goto fallback;
+	pdev = to_pci_dev(ring->nhi->dev);
+	if (pdev->vendor != PCI_VENDOR_ID_AMD ||
+	    (pdev->device != 0x158d && pdev->device != 0x158e) ||
+	    !(ring->flags & RING_FLAG_FRAME) || ring->start_poll ||
+	    ring->is_tx != tx || ring->hop <= 0 ||
+	    ring->hop >= ring->nhi->hop_count)
+		goto fallback;
+
+	/* Same ring serialization as __tb_ring_enqueue() and ring_work(). */
+	spin_lock_irqsave(&ring->lock, irqflags);
+	if (!ring->running || READ_ONCE(ring->nhi->going_away)) {
+		spin_unlock_irqrestore(&ring->lock, irqflags);
+		return -ESHUTDOWN;
+	}
+	if (!list_empty(&ring->queue) || ring->size <= 1 ||
+	    ring->size > U16_MAX || ring->head < 0 || ring->head >= ring->size ||
+	    ring->tail < 0 || ring->tail >= ring->size) {
+		spin_unlock_irqrestore(&ring->lock, irqflags);
+		goto fallback;
+	}
+	available = (ring->tail + ring->size - ring->head - 1) % ring->size;
+	if (available < count) {
+		spin_unlock_irqrestore(&ring->lock, irqflags);
+		goto fallback;
+	}
+	for (n = first; n < first + count; n++) {
+		if (!list_empty(&lane->frames[n].frame.list)) {
+			spin_unlock_irqrestore(&ring->lock, irqflags);
+			return -EINVAL;
+		}
+	}
+	descs = (struct tbv_bulk_desc *)ring->descriptors;
+	head = ring->head;
+	for (n = first; n < first + count; n++) {
+		struct ring_frame *frame = &lane->frames[n].frame;
+		struct tbv_bulk_desc *d = &descs[head];
+		u32 flags = RING_DESC_POSTED;
+		u32 metadata;
+
+		/* The final descriptor notifies for the entire ordered group. */
+		if (n + 1 == first + count)
+			flags |= RING_DESC_INTERRUPT;
+		metadata = tx ? frame->size | frame->eof << 12 | frame->sof << 16 :
+			le32_to_cpu(READ_ONCE(d->metadata)) & GENMASK(19, 0);
+		WRITE_ONCE(d->address, cpu_to_le64(frame->buffer_phy));
+		WRITE_ONCE(d->timestamp, 0);
+		WRITE_ONCE(d->metadata, cpu_to_le32(metadata | flags << 20));
+		list_add_tail(&frame->list, &ring->in_flight);
+		head = (head + 1) % ring->size;
+	}
+	ring->head = head;
+	/* Descriptors must reach coherent memory before advancing hardware. */
+	dma_wmb();
+	doorbell = ring->nhi->iobase + (tx ? 0 : 0x08000) + ring->hop * 16 + 8;
+	iowrite32(tx ? head << 16 : head, doorbell);
+	spin_unlock_irqrestore(&ring->lock, irqflags);
+	atomic64_inc(&dmabuf_bulk_calls);
+	atomic64_add(count, &dmabuf_bulk_frames);
+	if (tx) {
+		atomic64_add(count, &lane->rail->peer->state->data_tx_posted);
+		atomic64_add(count, &lane->rail->path.data_tx_posted);
+	}
+	return 0;
+fallback:
+	atomic64_inc(&dmabuf_bulk_fallback);
+	return -EAGAIN;
+}
+
 static int tbv_dmabuf_lane_post(struct tbv_dmabuf_lane *lane, bool tx,
 			       u32 first, u32 count)
 {
@@ -824,6 +1177,10 @@ static int tbv_dmabuf_lane_post(struct tbv_dmabuf_lane *lane, bool tx,
 		ret = -ENOTCONN;
 		goto out;
 	}
+	ret = tbv_dmabuf_post_bulk(lane, tx, first, count);
+	if (ret != -EAGAIN)
+		goto out;
+	ret = 0;
 	for (n = first; n < first + count; n++) {
 		ret = tx ? tb_ring_tx(ring, &lane->frames[n].frame) :
 			   tb_ring_rx(ring, &lane->frames[n].frame);
@@ -865,20 +1222,177 @@ static void tbv_dmabuf_post_group(struct work_struct *work)
 	/* Start every rail before filling any one ring. Posting a whole rail
 	 * first leaves its sibling idle during hundreds of MMIO writes. Small
 	 * turns overlap their DMA while preserving each ring's frame order. */
-	for (first = 0; first < frames; first += 16) {
+	for (first = 0; first < frames; first += dmabuf_post_burst) {
 		for (i = 0; i < group->batch->count; i++) {
 			struct tbv_dmabuf_lane *lane = &group->batch->lanes[i];
 
 			if (lane->dev != group->dev || first >= lane->count)
 				continue;
 			group->status = tbv_dmabuf_lane_post(lane, group->batch->tx,
-				first, min_t(u32, 16, lane->count - first));
+				first, min_t(u32, dmabuf_post_burst, lane->count - first));
 			if (group->status)
 				goto out;
 		}
 	}
 out:
 	tbv_perf_span(&perf, "post_worker", started, group->status, 0);
+}
+
+static bool tbv_dmabuf_progress_active(void)
+{
+	return atomic_read(&dmabuf_engine.progress_batches) ||
+		(dmabuf_poll_control &&
+		 atomic_read(&dmabuf_engine.state->verbs_qps));
+}
+
+/* A running callback alone owns forwarding/restarting. Repeated submissions
+ * must neither re-enqueue that callback nor postpone its progress deadline. */
+static void tbv_dmabuf_progress_start(void)
+{
+	unsigned long flags;
+
+	if (!dmabuf_verbs || !dmabuf_poll_us)
+		return;
+	spin_lock_irqsave(&dmabuf_engine.progress_lock, flags);
+	if (!dmabuf_engine.progress_stopping && !dmabuf_engine.progress_running) {
+		dmabuf_engine.progress_running = true;
+		hrtimer_start(&dmabuf_engine.progress_timer,
+			ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC),
+			HRTIMER_MODE_REL);
+	}
+	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
+}
+
+void tbv_dmabuf_progress_arm(void)
+{
+	if (dmabuf_poll_control)
+		tbv_dmabuf_progress_start();
+}
+
+/* Never wait for a callback while holding the lock that callback acquires. */
+static void tbv_dmabuf_progress_stop(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dmabuf_engine.progress_lock, flags);
+	dmabuf_engine.progress_stopping = true;
+	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
+	hrtimer_cancel(&dmabuf_engine.progress_timer);
+	cancel_work_sync(&dmabuf_engine.progress_work);
+	spin_lock_irqsave(&dmabuf_engine.progress_lock, flags);
+	dmabuf_engine.progress_running = false;
+	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
+}
+
+/* The fallback timer only needs to wake an ordinary ring worker when its
+ * next descriptor is complete. Do not reap, alter IRQs, or wait for a whole
+ * group: partial completions must return credits and preserve ring progress.
+ * The NHI ABI is the same pinned, opt-in ABI as bulk publication above. */
+static bool tbv_dmabuf_ring_ready(struct tb_ring *ring)
+{
+	struct tbv_bulk_desc *descs;
+	struct pci_dev *pdev;
+	unsigned long flags;
+	bool ready = true;
+
+	if (!dmabuf_batch_doorbell || !dev_is_pci(ring->nhi->dev))
+		return true;
+	pdev = to_pci_dev(ring->nhi->dev);
+	if (pdev->vendor != PCI_VENDOR_ID_AMD ||
+	    (pdev->device != 0x158d && pdev->device != 0x158e) ||
+	    ring->start_poll)
+		return true;
+	spin_lock_irqsave(&ring->lock, flags);
+	if (!ring->running || READ_ONCE(ring->nhi->going_away)) {
+		ready = false;
+	} else if (ring->descriptors && ring->size > 1 &&
+		   ring->head >= 0 && ring->head < ring->size &&
+		   ring->tail >= 0 && ring->tail < ring->size) {
+		if (ring->head == ring->tail) {
+			ready = !list_empty(&ring->queue);
+		} else {
+			descs = (struct tbv_bulk_desc *)ring->descriptors;
+			ready = (le32_to_cpu(READ_ONCE(descs[ring->tail].metadata)) >> 20) &
+				RING_DESC_COMPLETED;
+		}
+	}
+	spin_unlock_irqrestore(&ring->lock, flags);
+	return ready;
+}
+
+/* Hop zero belongs to the kernel XDomain control channel. Its ring pointers
+ * share nhi->lock with allocation/free. Only its ordinary worker reaps it. */
+static void tbv_dmabuf_progress_control(struct tb_nhi *nhi)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&nhi->lock, flags);
+	if (!nhi->going_away) {
+		if (nhi->tx_rings[0] && tbv_dmabuf_ring_ready(nhi->tx_rings[0]))
+			schedule_work(&nhi->tx_rings[0]->work);
+		if (nhi->rx_rings[0] && tbv_dmabuf_ring_ready(nhi->rx_rings[0]))
+			schedule_work(&nhi->rx_rings[0]->work);
+	}
+	spin_unlock_irqrestore(&nhi->lock, flags);
+}
+
+static void tbv_dmabuf_progress_work(struct work_struct *work)
+{
+	struct tbv_state *state = dmabuf_engine.state;
+	struct tbv_peer *peer;
+
+	if (READ_ONCE(dmabuf_engine.progress_stopping) ||
+	    !tbv_dmabuf_progress_active())
+		return;
+	/* A fallback tick must never queue behind the WR path that holds these
+	 * locks: whoever holds them is making progress, the next tick follows. */
+	if (!mutex_trylock(&state->lock)) {
+		atomic64_inc(&dmabuf_progress_skipped);
+		return;
+	}
+	list_for_each_entry(peer, &state->peers, node) {
+		struct tbv_rail *rail;
+
+		if (peer->backend != TBV_BACKEND_NATIVE)
+			continue;
+		list_for_each_entry(rail, &peer->rails, node) {
+			if (!mutex_trylock(&dmabuf_engine.ring_lock)) {
+				atomic64_inc(&dmabuf_progress_skipped);
+				continue;
+			}
+			if (!READ_ONCE(rail->removing) &&
+			    !READ_ONCE(rail->rings_stopped)) {
+				if (rail->path.tx_ring) {
+					if (tbv_dmabuf_ring_ready(rail->path.tx_ring))
+						schedule_work(&rail->path.tx_ring->work);
+					if (dmabuf_poll_control)
+						tbv_dmabuf_progress_control(rail->path.tx_ring->nhi);
+				}
+				if (rail->path.rx_ring && tbv_dmabuf_ring_ready(rail->path.rx_ring))
+					schedule_work(&rail->path.rx_ring->work);
+			}
+			mutex_unlock(&dmabuf_engine.ring_lock);
+		}
+	}
+	mutex_unlock(&state->lock);
+}
+
+static enum hrtimer_restart tbv_dmabuf_progress_timer(struct hrtimer *timer)
+{
+	unsigned long flags;
+	enum hrtimer_restart restart = HRTIMER_NORESTART;
+
+	spin_lock_irqsave(&dmabuf_engine.progress_lock, flags);
+	if (dmabuf_engine.progress_stopping || !tbv_dmabuf_progress_active()) {
+		dmabuf_engine.progress_running = false;
+	} else {
+		atomic64_inc(&dmabuf_progress_ticks);
+		queue_work(dmabuf_engine.progress_wq, &dmabuf_engine.progress_work);
+		hrtimer_forward_now(timer, ns_to_ktime((u64)dmabuf_poll_us * NSEC_PER_USEC));
+		restart = HRTIMER_RESTART;
+	}
+	spin_unlock_irqrestore(&dmabuf_engine.progress_lock, flags);
+	return restart;
 }
 
 static int tbv_dmabuf_batch_post(struct tbv_dmabuf_batch *batch, bool tx)
@@ -904,7 +1418,13 @@ static int tbv_dmabuf_batch_post(struct tbv_dmabuf_batch *batch, bool tx)
 	}
 	if (!frames)
 		return 0;
-	batch->submitted = true;
+	if (!batch->submitted) {
+		batch->submitted = true;
+		if (dmabuf_poll_us) {
+			atomic_inc(&dmabuf_engine.progress_batches);
+			tbv_dmabuf_progress_start();
+		}
+	}
 	if (!dmabuf_parallel_post || groups < 2 || frames < 128) {
 		for (i = 0; i < batch->count; i++) {
 			ret = tbv_dmabuf_lane_post(&batch->lanes[i], tx, 0,
@@ -995,7 +1515,7 @@ static void tbv_dmabuf_rx_finish(int status)
 {
 	struct tbv_dmabuf_rx *rx = &dmabuf_engine.rx;
 	struct tbv_control *ctrl = rx->control;
-	bool gpu = rx->buffer.mr;
+	bool direct = rx->buffer.mr || rx->buffer.host_mr;
 	u64 start;
 
 	tbv_dmabuf_batch_drop(&rx->batch, !!status);
@@ -1016,7 +1536,7 @@ static void tbv_dmabuf_rx_finish(int status)
 		tbv_control_get(ctrl);
 	tbv_dmabuf_rx_notify(status ?: TBV_DMABUF_DONE);
 	/* After DONE, so the credit never delays this WR's completion. */
-	if (!status && gpu)
+	if (!status && direct)
 		tbv_dmabuf_credit_next(ctrl);
 	tbv_control_put(ctrl);
 }
@@ -1070,7 +1590,7 @@ static int tbv_dmabuf_rx_reap_impl(void)
 	ret = rx->deferred;
 	if (ret)
 		goto fail;
-	if (!rx->buffer.mr) {
+	if (!rx->buffer.mr && !rx->buffer.host_mr) {
 		for (i = 0; i < rx->batch.count; i++) {
 			struct tbv_dmabuf_lane *lane = &rx->batch.lanes[i];
 			u32 offset = lane->first * TBV_DMABUF_FRAME_BYTES;
@@ -1203,6 +1723,7 @@ static void tbv_dmabuf_spec_adopt(const struct tbv_dmabuf_wire *m, int deferred)
 	rx->request.credit = 0;
 	rx->request.status = 0;
 	rx->deferred = deferred;
+	rx->adopted_credit = 0;
 	rx->next_offset = 0;
 	rx->deadline = jiffies + msecs_to_jiffies(30000);
 	tbv_control_put(rx->credit_ctrl);
@@ -1463,6 +1984,7 @@ static int tbv_dmabuf_spec_prepare(struct tbv_state *state,
 		return TBV_DMABUF_BUSY;
 	}
 	tbv_dmabuf_spec_adopt(m, 0);
+	rx->adopted_credit = credit;
 	m->credit = credit;
 	tbv_dmabuf_credit_count(CREDIT_ADOPTED);
 	return TBV_DMABUF_READY;
@@ -1498,9 +2020,16 @@ static int tbv_dmabuf_rx_prepare(struct tbv_state *state,
 	if (tbv_dmabuf_rx_active(rx)) {
 		if (!tbv_dmabuf_same(&rx->request, m, false))
 			return TBV_DMABUF_BUSY;
-		if (rx->state == TBV_DMABUF_RX_ARMED)
-			return tbv_dmabuf_same(&rx->request, m, true) ?
-				TBV_DMABUF_READY : -EINVAL;
+		if (rx->state == TBV_DMABUF_RX_ARMED) {
+			if (!tbv_dmabuf_same(&rx->request, m, true))
+				return -EINVAL;
+			/* READY is 0: an adoption above also ends here. */
+			if (rx->adopted_credit && m->credit != rx->adopted_credit) {
+				m->credit = rx->adopted_credit;
+				tbv_dmabuf_credit_count(CREDIT_READOPTED);
+			}
+			return TBV_DMABUF_READY;
+		}
 		if (m->offset == rx->request.offset && m->bytes == rx->request.bytes)
 			return TBV_DMABUF_DONE;
 		if (m->offset != rx->next_offset)
@@ -1550,6 +2079,7 @@ static int tbv_dmabuf_rx_prepare(struct tbv_state *state,
 		if (ret)
 			goto drop;
 		rx->state = TBV_DMABUF_RX_OPEN;
+		rx->adopted_credit = 0;
 		mutex_lock(&state->lock);
 		{
 			struct tbv_peer *peer;
@@ -1966,6 +2496,7 @@ static void tbv_dmabuf_credit_release(struct tbv_state *state,
 	struct tbv_dmabuf_wire m = *credit;
 	struct tbv_dmabuf_batch batch = {};
 	struct tbv_dmabuf_buffer buffer = {
+		.uncached = true,
 		.copy = tbv_dmabuf_zero_copy,
 		.alive = tbv_dmabuf_always_alive,
 	};
@@ -2503,12 +3034,21 @@ void tbv_dmabuf_disconnect(struct tbv_rail *rail)
 	if (dmabuf_engine.want_ctrl && rail->peer->dmabuf_control == dmabuf_engine.want_ctrl)
 		tbv_dmabuf_want_clear();
 	mutex_unlock(&dmabuf_engine.rx_lock);
+	tbv_dmabuf_cache_purge(rail);
 }
 
 int tbv_dmabuf_start(struct tbv_state *state)
 {
 	if (!dmabuf_verbs)
 		return 0;
+	if (!dmabuf_post_burst || dmabuf_post_burst > TBV_DMABUF_BATCH_FRAMES)
+		return -EINVAL;
+#ifndef TBV_BULK_NHI_ABI
+	if (dmabuf_batch_doorbell)
+		return -EOPNOTSUPP;
+#endif
+	if (dmabuf_poll_us && (dmabuf_poll_us < 10 || dmabuf_poll_us > 10000))
+		return -EINVAL;
 	/* Descriptor draining depends on Thunderbolt's ordinary ring workers;
 	 * neither this queue nor the verbs error queue is a reclaim worker. */
 	dmabuf_engine.tx_wq = alloc_ordered_workqueue("tbv_dmabuf_tx", 0);
@@ -2520,6 +3060,23 @@ int tbv_dmabuf_start(struct tbv_state *state)
 		destroy_workqueue(dmabuf_engine.tx_wq);
 		dmabuf_engine.tx_wq = NULL;
 		return -ENOMEM;
+	}
+	atomic_set(&dmabuf_engine.progress_batches, 0);
+	dmabuf_engine.progress_running = false;
+	WRITE_ONCE(dmabuf_engine.progress_stopping, false);
+	INIT_WORK(&dmabuf_engine.progress_work, tbv_dmabuf_progress_work);
+	hrtimer_setup(&dmabuf_engine.progress_timer, tbv_dmabuf_progress_timer,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	if (dmabuf_poll_us) {
+		dmabuf_engine.progress_wq = alloc_workqueue("tbv_dmabuf_progress",
+			WQ_UNBOUND | WQ_HIGHPRI, 1);
+		if (!dmabuf_engine.progress_wq) {
+			destroy_workqueue(dmabuf_engine.post_wq);
+			destroy_workqueue(dmabuf_engine.tx_wq);
+			dmabuf_engine.post_wq = NULL;
+			dmabuf_engine.tx_wq = NULL;
+			return -ENOMEM;
+		}
 	}
 	memset(&dmabuf_engine.rx, 0, sizeof(dmabuf_engine.rx));
 	memset(dmabuf_engine.credits, 0, sizeof(dmabuf_engine.credits));
@@ -2537,6 +3094,7 @@ void tbv_dmabuf_stop(void)
 {
 	if (!dmabuf_engine.tx_wq)
 		return;
+	tbv_dmabuf_progress_stop();
 	cancel_delayed_work_sync(&dmabuf_engine.rx_watchdog);
 	cancel_work_sync(&dmabuf_engine.credit_work);
 	mutex_lock(&dmabuf_engine.rx_lock);
@@ -2552,6 +3110,10 @@ void tbv_dmabuf_stop(void)
 	dmabuf_engine.tx_wq = NULL;
 	destroy_workqueue(dmabuf_engine.post_wq);
 	dmabuf_engine.post_wq = NULL;
+	if (dmabuf_engine.progress_wq) {
+		destroy_workqueue(dmabuf_engine.progress_wq);
+		dmabuf_engine.progress_wq = NULL;
+	}
 }
 
 /* The DMA-BUF attachment API used for imported GPU memory. */
