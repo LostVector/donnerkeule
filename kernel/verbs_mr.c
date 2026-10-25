@@ -15,14 +15,19 @@
 
 static atomic_t tbv_mr_key = ATOMIC_INIT(1);
 static bool dmabuf_host_direct;
+static unsigned int dmabuf_host_direct_min_bytes = SZ_64K;
 static atomic64_t host_dma_maps, host_dma_active;
 module_param(dmabuf_host_direct, bool, 0444);
 MODULE_PARM_DESC(dmabuf_host_direct,
 	"Map aligned ordinary host MRs directly to NHI descriptors; unaligned/tail WRs keep staging");
+module_param(dmabuf_host_direct_min_bytes, uint, 0444);
+MODULE_PARM_DESC(dmabuf_host_direct_min_bytes,
+	"Minimum page-aligned host DMA length (4096..65536, default 65536)");
 
 void tbv_host_dma_debugfs_show(struct seq_file *s)
 {
 	seq_printf(s, "dmabuf_host_direct: %u\n", dmabuf_host_direct);
+	seq_printf(s, "dmabuf_host_direct_min_bytes: %u\n", dmabuf_host_direct_min_bytes);
 	seq_printf(s, "dmabuf_host_maps: %lld\n", atomic64_read(&host_dma_maps));
 	seq_printf(s, "dmabuf_host_active_maps: %lld\n", atomic64_read(&host_dma_active));
 }
@@ -33,7 +38,10 @@ bool tbv_host_dma_eligible(struct tbv_mr *mr, u64 offset, u64 length)
 		!mr->dma_mr && !mr->dmabuf && mr->pages &&
 		mr->length <= SZ_256M && PAGE_ALIGNED(mr->start) &&
 		mr->npages == DIV_ROUND_UP(mr->length, PAGE_SIZE) &&
-		PAGE_ALIGNED(offset) && length >= SZ_64K && PAGE_ALIGNED(length) &&
+		PAGE_ALIGNED(offset) && dmabuf_host_direct_min_bytes >= PAGE_SIZE &&
+		dmabuf_host_direct_min_bytes <= SZ_64K &&
+		PAGE_ALIGNED(dmabuf_host_direct_min_bytes) &&
+		length >= dmabuf_host_direct_min_bytes && PAGE_ALIGNED(length) &&
 		offset <= mr->length && length <= mr->length - offset;
 }
 
