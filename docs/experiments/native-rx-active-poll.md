@@ -66,3 +66,33 @@ Repeat the affected seven-request model prefix, collecting both hosts' driver
 counters around every model history and token/transport wait traces. Resolve
 the424ms stall, quantify inference CPU cost, then repeat deep-queue, alias,
 disconnect and sustained-load correctness before proposing upstream promotion.
+
+
+## Autonomous follow-up (2026-10-27)
+
+A fresh matched0/100/100/0 run, with no wait interposer during inference,
+retains52/52 completion/work matches and156 extra work matches. Prefill is
+1565.47→1665.60tok/s (+6.40%), short decode40.340→40.341tok/s (unchanged),
+long decode39.248→38.850tok/s (~1.0% worse), C2 aggregate57.933→57.522tok/s.
+There are22/104 strict phase flags; keep the draft unqualified.
+
+Hot8KiB host p50 is40.214→33.209us; staged GPU-ready p50 is
+135.846→110.319us. Individual paired GPU-ready reductions vary27.1% and8.4%;
+the median improvement should not be presented as a stable27%.
+GPU-ready8KiB p99 is199.019→197.672us: no comparable tail gain.
+Whole-system EVO busy cores in short request windows rise2.92→3.63; this is
+not isolated driver CPU or watts.128000 host/staged endpoint payload checks
+pass, with zero per-exchange allocation/registration and no tracked retry/error
+counter increments in either model or exchange windows.
+
+Two exploratory one-sided settings also pass26/26 output/work matches and
+64000 payload checks. EVO-only loses the prefill gain; Corsair-only appears
+lower-cost but its independent matched repetition must be assessed separately.
+These single starts are not qualification. No original424ms recurrence;
+a244ms interval occurs in a baseline run, without a coincident wait trace to
+attribute its cause. No table warming or storage-policy change.
+
+Per-start model summaries are in native-rx-followup.csv. Complete raw artifacts
+remain under ~/strix-dispatch-investigation/driver-latency/autotune/results
+and results/model-scaling/rx-tune-*. The clean PR module remains untested on
+hardware; this is still evidence from the pinned private instrumented stack.
