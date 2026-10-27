@@ -96,3 +96,12 @@ Per-start model summaries are in native-rx-followup.csv. Complete raw artifacts
 remain under ~/strix-dispatch-investigation/driver-latency/autotune/results
 and results/model-scaling/rx-tune-*. The clean PR module remains untested on
 hardware; this is still evidence from the pinned private instrumented stack.
+
+
+The independent Corsair-only repeat is now complete and **rejects** that
+one-sided setting: GPU-ready8KiB hot p50 worsens130.378→151.018us, p99
+199.582→222.742us; prefill+0.44%, short decode-0.51%, C2-1.18%, with15/104
+strict phase flags. All52 additional outputs/work and128000 payload checks
+pass with no tracked retry/error increases. Neither one-sided setting is
+recommended. Both hosts restored prior81C6. Adaptive polling remains a separate,
+built-only experiment, with no hardware performance claim.
