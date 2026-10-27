@@ -75,11 +75,11 @@ counter deltas also include warmup, so they are not one-to-one slow RTTs.
 
 | Mode | Median µs | p99 µs | >10ms observations /4,000 | Retries |
 |---|---:|---:|---:|---:|
-| Legacy control1 |80.477|73,728.099|272|184|
-| New consumer, IRQ-only |80.847|202.773|0|0|
-| New consumer +1ms recheck1 |89.647|290.882|0|0|
-| Legacy control2 |76.527|72,826.873|231|172|
-| New consumer +1ms recheck2 |93.107|208.443|0|0|
+| Legacy control1 |80.468|73,728.099|272|184|
+| New consumer, IRQ-only |80.832|202.773|0|0|
+| New consumer +1ms recheck1 |89.622|290.882|0|0|
+| Legacy control2 |76.523|72,826.873|231|172|
+| New consumer +1ms recheck2 |93.022|208.443|0|0|
 
 The IRQ-only result shows that these improvements do not require a periodic
 watchdog. The repeated legacy control reproduced the stall. Additional cases
