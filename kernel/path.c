@@ -8,9 +8,11 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/thunderbolt.h>
+#include <linux/timekeeping.h>
 
 #include "../proto/native_data.h"
 #include "tbv.h"
+#include "rx_active_poll.h"
 
 #define TBV_NATIVE_RING_SIZE 1024
 /* Apple-originated bursts can exhaust a 256-entry RX ring before credits
@@ -46,6 +48,10 @@ static uint native_rx_recheck_ms = 1;
 module_param(native_rx_recheck_ms, uint, 0444);
 MODULE_PARM_DESC(native_rx_recheck_ms,
 		 "Native RX liveness recheck in ms (1..1000); 0 disables periodic progress");
+static uint native_rx_active_poll_us;
+module_param(native_rx_active_poll_us, uint, 0444);
+MODULE_PARM_DESC(native_rx_active_poll_us,
+		 "Bounded native RX active polling in us (clamped to 1000; default off)");
 #define TBV_RX_PROGRESS_BUDGET 256
 static atomic64_t native_rx_progress_irqs, native_rx_progress_runs;
 static atomic64_t native_rx_progress_frames, native_rx_progress_empty;
@@ -54,6 +60,7 @@ static atomic64_t native_rx_progress_budget;
 void tbv_native_rx_progress_debugfs_show(struct seq_file *s)
 {
 	seq_printf(s, "native_rx_progress: %u\n", native_rx_progress);
+	seq_printf(s, "native_rx_active_poll_us: %u\n", min_t(u32, native_rx_active_poll_us, 1000));
 	seq_printf(s, "native_rx_recheck_ms: %u\n", native_rx_recheck_ms);
 	seq_printf(s, "native_rx_progress_irqs: %lld\n", atomic64_read(&native_rx_progress_irqs));
 	seq_printf(s, "native_rx_progress_runs: %lld\n", atomic64_read(&native_rx_progress_runs));
@@ -94,13 +101,26 @@ static void tbv_path_rx_progress_work(struct work_struct *work)
 					     struct tbv_path, rx_progress_work);
 	struct ring_frame *frame;
 	u32 n = 0;
+	u32 active_us = min_t(u32, READ_ONCE(native_rx_active_poll_us), 1000);
+	u64 active_start;
 
 	if (!READ_ONCE(path->rx_progress_enabled))
 		return;
+	active_start = active_us ? ktime_get_ns() : 0;
 	atomic64_inc(&native_rx_progress_runs);
 	while (n < TBV_RX_PROGRESS_BUDGET &&
-	       READ_ONCE(path->rx_progress_enabled) &&
-	       (frame = tb_ring_poll(path->rx_ring))) {
+	       READ_ONCE(path->rx_progress_enabled)) {
+		frame = tb_ring_poll(path->rx_ring);
+		/* Keep the existing consumer briefly after useful work. The
+		 * entry-relative deadline is never extended by arrivals. */
+		if (!frame && tbv_rx_active_poll_again(active_us, n,
+			TBV_RX_PROGRESS_BUDGET, READ_ONCE(path->rx_progress_enabled),
+			active_start, active_us ? ktime_get_ns() : 0)) {
+			cpu_relax();
+			continue;
+		}
+		if (!frame)
+			break;
 		/* Frame callback reposts its own buffer through tb_ring_rx(). */
 		if (frame->callback)
 			frame->callback(path->rx_ring, frame, false);

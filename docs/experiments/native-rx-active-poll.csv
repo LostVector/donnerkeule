@@ -1,0 +1,5 @@
+phase,poll_us,short_c1_tokens_s,long_c1_tokens_s,pp2048_tokens_s,c2_aggregate_tokens_s
+control-1,0,40.52479,39.24343,1573.974,58.12919
+candidate-1,100,40.99138,39.60908,1682.622,58.53534
+candidate-2,100,40.96487,39.57695,1684.813,58.56213
+control-2,0,40.53133,39.42270,1569.798,57.91663
