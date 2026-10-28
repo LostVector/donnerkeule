@@ -58,7 +58,7 @@ int main(void){
  /* Active polling expires at a fixed deadline, and never spins on an empty entry. */
  native_rx_active_poll_us=100;fake_ns=0;relax_calls=0;
  ring.next=1024;next_expected=1024;run(&path);
- assert(callbacks==1026 && relax_calls==99 && fake_ns==101000);
+ assert(callbacks==1026 && relax_calls==19 && fake_ns==21000);
  relax_calls=0;run(&path);assert(!relax_calls);
  native_rx_active_poll_us=0;
  /* Disable/enqueue race: after disable returns, even ongoing IRQ producers
@@ -66,5 +66,16 @@ int main(void){
  pthread_t irq;assert(!pthread_create(&irq,NULL,irq_loop,&path));sched_yield();tbv_path_rx_progress_disable(&path);assert(!pthread_join(irq,NULL));assert(!path.rx_progress_work.pending && !path.rx_progress_enabled);
  int oldpoll=poll_calls,oldrearm=rearms;run(&path);assert(poll_calls==oldpoll && rearms==oldrearm);
  assert(callbacks==1026 && next_expected==1025 && native_rx_progress_budget==4);
+ /* A burst can use the full configured window, bounded from entry. */
+ path.rx_progress_enabled=true;native_rx_active_poll_us=100;
+ ring.next=1017;next_expected=1017;fake_ns=0;relax_calls=0;
+ run(&path);assert(callbacks==1034 && next_expected==1025);
+ assert(relax_calls==99 && fake_ns==101000);
+ tbv_path_rx_progress_disable(&path);
+ for(unsigned us=0;us<=1000;us++)for(unsigned n=0;n<=256;n++) {
+  unsigned w=tbv_rx_active_window_us(us,n);
+  assert(w<=us && w<=1000);
+  if(n<8)assert(w<=20);else assert(w==us);
+ }
  puts("PASS: ordered1025-frame drain, bounded batches, IRQ/rearm priority, IRQ-only, disabled state,100000 concurrent IRQ/disable attempts");
 }

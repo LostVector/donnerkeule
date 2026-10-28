@@ -1,3 +1,7 @@
+> Latest code uses a20us small-batch cap with burst-aware extension. Historical
+> full-window measurements below are retained; see native-rx-adaptive.md for
+> the new policy hardware results and unresolved timing gates.
+
 # Experimental bounded native RX active polling
 
 This draft stacks on `fix/native-rx-progress` (upstream PR neuhaus/donnerkeule#2).
@@ -5,8 +9,10 @@ It adds `native_rx_active_poll_us=100` as an opt-in module parameter, effective
 only on native paths using `native_rx_progress=1`. Default is zero; values above
 1000 are clamped. Inspect the effective value in the RX debugfs summary.
 
-The existing single consumer polls after at least one frame until an
-entry-relative deadline. Arrivals never extend the deadline. Empty entries do
+The existing single consumer polls after at least one frame. Batches below
+eight frames use min(configured cap,20us); larger bursts may use the configured
+cap. Both deadlines are relative to worker entry, never reset per arrival,
+and cannot pass entry plus the configured cap. Empty entries do
 not spin. The 256-frame budget, disable checks, interrupt rearm and periodic
 liveness recheck remain. No ring API is called under the queue/disable lock.
 This trades worker CPU for fewer rearm cycles; it is not free throughput.

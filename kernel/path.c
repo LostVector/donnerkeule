@@ -111,11 +111,14 @@ static void tbv_path_rx_progress_work(struct work_struct *work)
 	while (n < TBV_RX_PROGRESS_BUDGET &&
 	       READ_ONCE(path->rx_progress_enabled)) {
 		frame = tb_ring_poll(path->rx_ring);
-		/* Keep the existing consumer briefly after useful work. The
-		 * entry-relative deadline is never extended by arrivals. */
-		if (!frame && tbv_rx_active_poll_again(active_us, n,
-			TBV_RX_PROGRESS_BUDGET, READ_ONCE(path->rx_progress_enabled),
-			active_start, active_us ? ktime_get_ns() : 0)) {
+		/* Use a short window for small batches and the configured cap
+		 * for bursts. Neither window resets the entry timestamp. */
+		if (!frame &&
+		    tbv_rx_active_poll_again(tbv_rx_active_window_us(active_us, n),
+					     n, TBV_RX_PROGRESS_BUDGET,
+					     READ_ONCE(path->rx_progress_enabled),
+					     active_start,
+					     active_us ? ktime_get_ns() : 0)) {
 			cpu_relax();
 			continue;
 		}
