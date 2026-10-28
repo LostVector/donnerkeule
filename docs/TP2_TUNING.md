@@ -1,14 +1,86 @@
 # Gufo TP2 on dual Strix Halo: tested settings and launch recipe
 
-Measured 2026-10-27 on GMKtec EVO-X2 + Corsair AI Workstation300,
+Updated 2026-10-28 on GMKtec EVO-X2 + Corsair AI Workstation300,
 each Ryzen AI Max+395/128GB. Initial measurements used20Gbit/s per direction;
-the latest qualification negotiated40Gbit/s (20Gbit/s/lane ×2).
+each cable now qualifies at40Gbit/s (20Gbit/s/lane ×2), with two cables tested.
 This records our best-tested **experimental starting profiles**, not a proven
 universal optimum. It includes a one-command-per-rank launcher **after the
 compatible driver, provider and Gufo are installed**. It is not a fresh-OS
 installer; exact benchmark reproduction has unpublished prerequisites below.
 
-## Latest40Gbit/s measurements
+## Latest: two cables and reboot persistence
+
+**Dual-cable support is already in the tested driver; no new driver code or
+kernel patch is needed for this pair.** Both cables trained at40Gb/s per
+direction, and native striping pooled their four rails to the same remote host.
+
+AlwaysTP2, matched one/two/two/one **active-cable** starts:
+
+| Measurement | One active cable | Two active cables |
+|---|---:|---:|
+| One-way bulk, Corsair→EVO |19.80Gb/s|42.74Gb/s|
+| One-way bulk, EVO→Corsair |20.38Gb/s|43.24Gb/s|
+| Uncached32K prefill |1708tok/s|2023tok/s (+18.4%)|
+| AR single-stream prose decode |39.64tok/s|39.66tok/s|
+| AR two-request aggregate |60.33tok/s|60.02tok/s|
+
+MTP code is also flat; MTP prose slowed in these starts. Extra cable bandwidth
+helps large prefill exchanges, not every decode workload. Small~10KiB decode
+messages are below the64KiB block-striping threshold. Hot8KiB **GPU-staged
+verified RTT** is~109us either way, whereas512KiB improves758→514us. The109us
+includes staging, peer/local GPU validation and waits; it is not pure wire
+latency or one-way Gufo collective time. [Full methods, tails and CSVs](experiments/two-cable-tp2.md).
+
+Both cables remained physically connected throughout. The control selected
+only the original controller/domain1 (`native_domain_mask=2`); both used domains
+0/1 (`=3`). Those masks are specific to our enumeration. **Do not persist the
+one-cable test mask.** For normal dual-cable operation, allow both controllers;
+omitting the mask retains the driver's all-domains default. Keep `lanes=2`
+per link; four rails do not mean changing that option to4.
+
+The completed two-cable baseline used the qualified private81C6 module, TX32,
+RX pollingoff, and this shared native setup on both hosts:
+
+```text
+profile=linux_perf tbnet=prefer_rdma lanes=2
+bind_services=1 allocate_rings=1 start_rings=1 negotiate_native=1
+enable_tunnels=1 register_verbs=1 roce_netdev=tbv_strix
+native_write_striping=1 native_rx_progress=1 native_rx_recheck_ms=1
+native_tx_max_inflight=32
+```
+
+The private81C6 baseline does not expose the active-poll option; omit it there.
+On a polling-capable build,0 selects off. The adaptiveRX/TX128 **combination on
+four rails is a separate ongoing experiment**, not yet a recommended combined
+default. The earlier single-cable wins below must not be added arithmetically.
+
+### What must persist across reboots
+
+This is deployment/startup configuration, not a new two-cable algorithm:
+
+1. Make the exact tested, signed module and matching userspace provider available
+   on both machines. Install/index the module for the target kernel or use a
+   root-owned, checksum-verified loader. Kernel updates require matching rebuilds
+   and signing; do not silently substitute an unqualified release/private build.
+2. Persist the policy preventing `thunderbolt_net` from taking the cable data
+   rings. Our current `/run/modprobe.d` blacklist is temporary. Management
+   Ethernet must remain available; USB4 carries native data, not the SSH route.
+3. Create/configure `tbv_strix` before the driver loads, with the tested dummy
+   GID addresses below; load `thunderbolt`, `ib_core`, `ib_uverbs`, `configfs`
+   and then the native driver/options. A root-owned boot service can enforce
+   that order. A plain modules-load list may run before the dummy interface.
+4. Check both trained links, four ready rails and a common remote-host identity
+   before starting Gufo. More device names alone do not prove correct pooling.
+   Keep the Gufo provider/ROCm runtime environment in its launcher or service.
+
+Those persistent startup units/options are **not installed by this guide or the
+portable launcher yet**; our tests restore runtime state through a restricted
+loader. No new GRUB/IOMMU option is required solely for dual cables. This table
+used normal translatedNHI on Corsair and IOMMUoff on EVO. Separate IOMMU tests
+found modest prefill gains fromoff, but its NPU driver fails; do not turn it off
+as a supposed prerequisite for obtaining43Gb/s over two cables.
+
+## Historical one-cable40Gbit/s measurements
 
 See [the completed40G report](experiments/link40.md) for CPU costs, MTP/C4/DP2
 results and retained limitations. At32K, TP2 polling off/adaptive/full measured
@@ -59,7 +131,7 @@ Gufo must be built for ROCm/gfx1151 with `GUFO_ENABLE_TP2_RDMA=ON`;
 a build without that feature cannot use the launcher.
 Start with the repository's [installation guide](../README.md#install-from-github-releases)
 and the [board notes](STRIX_HALO_BOARDS.md), but distinguish their DMA-BUF/
-two-cable experiments from our **one-cable host-window** results. This guide
+GPU-direct experiments from our **native host-window** results on one and two cables. This guide
 does not adopt their boot options or DMA-BUF flags. Management/control runs
 over Ethernet while USB4 carries tensor exchange. Keep that management path
 working; the dummy GID interface below is not a cable IP route.
@@ -85,9 +157,9 @@ a stock checkout. Public patch/build packaging for those prerequisites is
 still needed for a complete from-source one-shot reproduction. This document
 and launcher make the **settings** reusable without pretending that gap is closed.
 
-## 3. Driver policy we actually tested
+## 3. Shared setup and historical one-cable polling policies
 
-On our native host-window stack:
+The historical one-cable adaptive profile used:
 
 ```text
 profile=linux_perf tbnet=prefer_rdma lanes=2
