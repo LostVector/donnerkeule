@@ -78,3 +78,9 @@ Use [the launch guide](../TP2_TUNING.md) for supported starting profiles.
 [Post22 and earlier discussion](https://forum.level1techs.com/t/benchmarking-usb4-performance-on-strix-halo/245299/22) provide useful leads. Both live endpoints already report `nhi_interrupt_throttle_ns=0`; our driver uses the optional kernel ring-throttling API before starting rings. The old128us stock setting is therefore not an untried fix. Local kernel TB_MAX_FRAME_SIZE is4096: larger verbs messages still require multiple descriptors. The thread's78Gb/s claim is not independently verified here. Ring occupancy, descriptor/credit turnover and batching are better next measurements than another blind TX-window increase. No kernel/boot/power settings changed.
 
 A512KiB completion-audit exchange adds8,000 endpoint payload checks. Hot host RTT p50/p95/p99=649.37/766.04/809.01us; GPU-staged728.93/765.10/831.47us. These include peer validation and GPU fences, not just wire time. The counter audit now covers62 snapshot pairs, with no tracked increases.
+
+## Bulk-polling negative control
+
+Same private7E27 module, off/full/full/off100us sequence,40MiB,1QP,depth8,8second perftest runs in both directions. Off→full medians: Corsair→EVO19.545→19.505Gb/s; EVO→Corsair20.30→20.34Gb/s. RX frames/worker rise~2→14–15 but bandwidth remains flat; whole-run sender CPU increases~0.9–1.2 logical cores. Reject full polling as a bulk-bandwidth fix; the separate prefill benefit remains. Baseline81C6 restored.
+
+Baseline/window software-credit stall deltas are zero. One full phase records23 stalls across~5million frames; counter counts do not quantify stall time. Hardware hop-credit allocation is independent and unmeasured. Per-descriptor NHI MMIO and completion retirement are plausible next tracing targets, not proven bottlenecks. Expanded counter audit covers70 captured intervals without tracked error/retry increments.
