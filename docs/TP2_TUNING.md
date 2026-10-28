@@ -8,6 +8,18 @@ universal optimum. It includes a one-command-per-rank launcher **after the
 compatible driver, provider and Gufo are installed**. It is not a fresh-OS
 installer; exact benchmark reproduction has unpublished prerequisites below.
 
+## Stability notice: Linux7.3 teardown investigation
+
+Our current pair has saved kernel oopses during reboot after Thunderbolt-core
+unload/reload cycles. Vmcore and read-only live-device inspection show orphaned
+Thunderbolt service/XDomain objects retaining stale module bus/type pointers.
+A candidate kernel-core cleanup fix builds but is **not installed or qualified**.
+This is separate from inference speed measurements; these instructions do not
+establish production reboot safety. Avoid repeated core-module reloads as a
+link-tuning technique. Do not repair kernel lists/pointers manually or force
+unload. Keep management Ethernet and a known-good kernel available. Persistent
+startup setup remains pending stability qualification.
+
 ## Latest: two cables and reboot persistence
 
 **Dual-cable support is already in the tested driver; no new driver code or
