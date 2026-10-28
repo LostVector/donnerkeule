@@ -22,6 +22,38 @@ persistent startup units remain separate; do not assume stock Linux7.3 has this
 fix or repair kernel lists/pointers manually. Keep management Ethernet and a
 known-good kernel available.
 
+## Fresh matched TP1 / TP2 baseline
+
+After the kernel lifetime fix, the same binary and fully rehashed UD-Q4_K_XL
+files measured this ABBA comparison (MTP off, uncached requests):
+
+| Measurement | TP1, EVO | TP2 |
+|---|---:|---:|
+| 2K prefill |1,732 tok/s|1,809 tok/s|
+| 8K prefill |1,683 tok/s|2,069 tok/s|
+| 32K prefill |1,643 tok/s|2,020 tok/s|
+| Short single-stream decode |29.56 tok/s|40.09 tok/s|
+| Two-request whole-request aggregate |45.84 tok/s|58.59 tok/s|
+
+Prefill context is 65,536; AR context is 4,096. Settings match across world sizes
+within each profile. The generic CLI `--prefill-chunk 2048` does **not** mean
+2,048-row GPU batches in this Flash backend: it owns 4,096-token banks, with
+up to 8,192 paired tokens per TP2 step. Changing that CLI knob alone did not
+change the observed cold-prefill geometry. An actual 4K/8K backend experiment is
+separate and ongoing; no larger-bank default is recommended yet.
+
+Within-world output/work repeats match, and tracked driver error/retry deltas
+are zero. AR continuations differ across world sizes: this is practical engine
+scaling, not token-forced identical execution or an accuracy certification.
+[Detailed methods and public summaries](experiments/matched-scaling.md).
+
+**Correctness prerequisite:** [native host RC ordering and TX retirement PR #3](https://github.com/LostVector/donnerkeule/pull/3)
+contains the missing non-tracing correctness changes used in the measured
+private stack. Review it before the separate polling or TX-window tuning PRs.
+Its rebuilt unsigned module is byte-identical to our earlier bounded
+hardware-qualified artifact; today's current serving baseline remains private
+81C6. A bare tuning PR is not the complete measured stack.
+
 ## Latest: two cables and reboot persistence
 
 **Dual-cable support is already in the tested driver; no new driver code or
