@@ -25,8 +25,8 @@ qualified52C08D90CDFE35DF0026149 artifact (SHA256
 70cb751314c1e32f9be4f48de23437f7b626d0847a64014e87c1aab7f76aae01).
 Its recorded hardware gate passed7 initial cases,24 extended cases,4 expected
 peer exits with4 fresh reconnections and91 matching model output/work checks.
-That earlier bounded qualification is distinct from a new test of this clean
-build on today's four-rail/fixed-core setup; current serving still uses81C6.
+That earlier bounded qualification is distinct from the fresh campaign below.
+Current serving was restored to81C6 after testing.
 
 Production-helper ASan/UBSan regression tests are in tools/ci/native-rc-order-tests.
 Kernel build and inherited CI must pass before deployment. Qualification should
@@ -36,3 +36,36 @@ retaining all counter/timing failures and restoring the pinned baseline.
 This correctness prerequisite should be reviewed separately from RX polling and
 TX128 throughput tuning. The Linux7.3 Thunderbolt XDomain lifetime fix is another
 separate kernel-core prerequisite; this ibdev patch does not address it.
+
+## Fresh two-cable qualification,2026-10-28
+
+The exact clean7e6c0b3 module was loaded transiently on both Strix Halo hosts,
+with the already-installed7.3 Thunderbolt lifetime fix, two40Gb/s USB4 cables,
+four native rails, host windows, RXprogress1/recheck1ms and TX32. No system ROCm,
+core module or boot configuration was changed. Approved81C6 was restored.
+
+-12 paired host/GPU-staged exchange cases,48000 completed RTT samples,8–64KiB,
+ hot and300us idle, with payload/order/reuse checks on both endpoints.
+-8 disjoint/overlap/partial/physical-alias ordering cases, including32-deep4MiB
+ cases in both directions.
+-4 deliberate peer exits and4 fresh reconnect/recovery checks.
+-5 Gufo requests matching reference output hashes and prompt/cache/output work.
+
+Clean exchange, ordering, recovery and model intervals have no tracked error/
+retry increases. Each induced peer-exit interval separately records one receiver
+ACK error and one reorder timeout. These observations remain in the audit;
+they are not included in clean-traffic claims. Captured kernel logs contain no
+Oops/BUG/panic/refcount warning patterns. This is finite host-window RC coverage,
+not an overnight guarantee or qualification of all verbs/DMA-BUF modes.
+
+Initial8KiB idle RTT medians varied75/132/70us across before/clean/after. A fresh
+baseline/clean/clean/baseline repeat measured133/133/66/134us and no new tracked
+errors over32000 additional samples. Hot RTT stayed~37–39us. This benchmark
+sleeps both endpoints and includes peer readiness; no consistent clean-module
+latency regression was established, nor pure-wire latency measured.
+
+The matching provider source is available in this commit. Its three packaging
+patches exactly reproduce the tested provider build on rdma-core558104fc;
+no unpublished provider delta is required. Detailed JSON/CSV evidence and the
+Gufo source bundle are linked in the fork's
+[reproduction record](https://github.com/LostVector/donnerkeule/blob/perf/native-rx-active-poll/docs/experiments/portable-tp2-baseline.md).
