@@ -1,0 +1,16 @@
+--- a/drivers/thunderbolt/domain.c
++++ b/drivers/thunderbolt/domain.c
+@@ -508,6 +508,13 @@
+ 	mutex_unlock(&tb->lock);
+ 
+ 	flush_workqueue(tb->wq);
++
++	/* stop() detaches XDomains under tb->lock, marking them unplugged.
++	 * Complete device removal after dropping that lock and draining domain
++	 * work, before the controller and its module can disappear. Otherwise
++	 * service devices retain bus/type pointers into an unloaded module.
++	 */
++	tb_domain_unregister_unplugged_xdomains(tb);
+ 
+ 	if (tb->cm_ops->deinit)
+ 		tb->cm_ops->deinit(tb);

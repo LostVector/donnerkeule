@@ -8,17 +8,19 @@ universal optimum. It includes a one-command-per-rank launcher **after the
 compatible driver, provider and Gufo are installed**. It is not a fresh-OS
 installer; exact benchmark reproduction has unpublished prerequisites below.
 
-## Stability notice: Linux7.3 teardown investigation
+## Linux7.3 teardown fix qualified on this pair
 
-Our current pair has saved kernel oopses during reboot after Thunderbolt-core
-unload/reload cycles. Vmcore and read-only live-device inspection show orphaned
-Thunderbolt service/XDomain objects retaining stale module bus/type pointers.
-A candidate kernel-core cleanup fix builds but is **not installed or qualified**.
-This is separate from inference speed measurements; these instructions do not
-establish production reboot safety. Avoid repeated core-module reloads as a
-link-tuning technique. Do not repair kernel lists/pointers manually or force
-unload. Keep management Ethernet and a known-good kernel available. Persistent
-startup setup remains pending stability qualification.
+Our pair exposed stale Thunderbolt service/XDomain objects after core-module
+unload/reload, leading to reboot-path oopses. An isolated kernel-core cleanup
+patch is now installed and has passed three unload/reload cycles, native payload
+checks and a subsequent native-loaded reboot on **each** host. This is separate
+from the RDMA polling changes and is bounded qualification, not production
+certification. [Patch, evidence and deployment limits](experiments/kernel-xdomain-lifetime.md).
+
+The tested core srcversion is `BDA6ED32433F9503D84E02F`. Fresh-OS setup and
+persistent startup units remain separate; do not assume stock Linux7.3 has this
+fix or repair kernel lists/pointers manually. Keep management Ethernet and a
+known-good kernel available.
 
 ## Latest: two cables and reboot persistence
 
