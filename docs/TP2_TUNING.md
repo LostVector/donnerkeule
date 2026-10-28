@@ -51,8 +51,10 @@ native_tx_max_inflight=32
 
 The private81C6 baseline does not expose the active-poll option; omit it there.
 On a polling-capable build,0 selects off. The adaptiveRX/TX128 **combination on
-four rails is a separate ongoing experiment**, not yet a recommended combined
-default. The earlier single-cable wins below must not be added arithmetically.
+four rails completed its separate experiment**: 32K prefill improved only0.49%,
+ordinary single-stream decode was flat, and CPU increased. MTP prose slowed;
+39 timing flags and two receive-QP counter increments remain under investigation.
+It is not a recommended combined default. The earlier single-cable wins below must not be added arithmetically.
 
 ### What must persist across reboots
 
