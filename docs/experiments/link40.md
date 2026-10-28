@@ -46,7 +46,7 @@ TX frame window32/64/128: mean one-way19.88/19.905/20.24Gb/s. Best gain **1.81%*
 
 AR/MTP audit:114/114 same-world paired outputs and work records match, including warmups. This is bounded fixture evidence, not full accuracy/logit equivalence, sampled-mode qualification or cross-world numerical parity. Repeated AR starts have their own within-world audit. Transport includes64,000 measured payload checks plus ordering tests; bulk perftest throughput is not itself a payload-integrity oracle.
 
-Counter audit:60 before/after snapshot pairs, zero increases across the common data-path error/retry/RNR/timeout/lost/failed fields. This covers the captured intervals, not an uptime-wide guarantee.
+Counter audit:62 before/after snapshot pairs, zero increases across the common data-path error/retry/RNR/timeout/lost/failed fields. This covers the captured intervals, not an uptime-wide guarantee.
 
 Retain cold deep-prefill tails: TP2 AR prose31.29 then38.79tok/s, MTP prose46.74 then54.14. A105ms AR gap and119.8ms MTP maximum remain. Disk I/O is a hypothesis here; historical n-gram stalls do not prove the cause of these particular events. No outlier deletion or full-table warming.
 
