@@ -11,8 +11,13 @@ host-write transport patch. This isolates compiled per-bank batch capacity.
 |8192|2034.28|
 
 Observed gain0.59%; two starts per setting, three measured requests/start.
-Too small to promote the larger allocation as an optimal default. No statistical
-claim that the true gain is positive. Original4K control remains recommended.
+The existing experiment does not establish statistical significance: only two
+independent starts per setting were measured. Three requests within a start do
+not create three independent treatment assignments. Small effect size alone is
+not a reason to reject an optimization. Keep the current default pending stronger
+confidence and the transport failure-path qualification below. A follow-up should
+use randomized blocked starts, a predeclared analysis and pilot-based sample size,
+rather than significance-driven stopping.
 
 Every repeated and cross-setting request has identical prompt/output counts,
 prompt hash and completion hash (12 pairwise comparisons). All tracked driver
