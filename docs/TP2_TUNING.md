@@ -194,20 +194,27 @@ Exact measured stack:
 |---|---|
 | Linux |7.3.0-strix-test (custom test build, not a generic release recommendation)|
 | ROCm/HIP |private user-local7.14.1 install; no system ROCm replacement|
-| Gufo base |[neuhaus/gufo](https://github.com/neuhaus/gufo) `0b6978aa1709f2ef863f5407e4ca7261191e9046` **plus private changes**|
+| Gufo base |[neuhaus/gufo](https://github.com/neuhaus/gufo) `0b6978aa1709f2ef863f5407e4ca7261191e9046` **plus the linked source bundle**|
 | Measured Gufo executable SHA256 |`b288378fe41039f940aed5747c21c0964d9937e0f586e2cef063a2fd087f7599`|
 | Adaptive driver private build sourceversion |`BB616A07CF93BF833C36C26`|
 | Restore/baseline private build sourceversion |`81C6FF2FBAC473C7AB21844`|
 
-The measured Gufo includes host-staging and one/two-row head-sharding/
-half-head-gather changes. The private driver additionally has RC ordering/
-retirement fixes and diagnostic probes. **The clean polling branch in this
-fork is not that exact full stack.** The Gufo base commit alone does not
-produce the measured executable, and the binary hash is provenance, not a
-public download. Do not promise our throughput or ordering qualification from
-a stock checkout. Public patch/build packaging for those prerequisites is
-still needed for a complete from-source one-shot reproduction. This document
-and launcher make the **settings** reusable without pretending that gap is closed.
+The measured Gufo includes host-staging and one/two-row half-head gathering.
+Those changes now have a [pinned source/build bundle](patches/gufo-tp2-baseline/README.md),
+with a checksum-checked helper and an independent two-node probe. It builds and
+matches ten same-world TP1/TP2 request outputs/work records. The old executable
+hash is provenance, not a public binary download or a timing guarantee.
+
+For the driver, use **fix/native-rc-ordering at7e6c0b3** ([PR3](https://github.com/LostVector/donnerkeule/pull/3)),
+which now has fresh four-rail/fixed-core correctness and recovery qualification.
+The polling/docs branch alone does not contain that prerequisite. Its provider
+source matches the tested runtime; no unpublished provider patch is needed.
+[Reproduction evidence and limits](experiments/portable-tp2-baseline.md) include
+all timing flags and the variable idle-latency results. Performance/quality
+qualification remains narrower than build/output parity. In particular,
+cached-versus-cold continuation equivalence is unresolved in earlier controls;
+these requests used cache reads OFF and MTP OFF. This remains an experimental
+setup/configuration recipe, not a universal installer or model-quality claim.
 
 ## 3. Shared setup and historical one-cable polling policies
 

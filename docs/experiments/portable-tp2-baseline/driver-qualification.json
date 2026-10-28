@@ -1,0 +1,46 @@
+{
+  "paired_transport_cases": 12,
+  "rtt_samples": 48000,
+  "ordering_cases": 8,
+  "expected_peer_exit_cases": 4,
+  "fresh_recovery_cases": 4,
+  "model_requests_matching_reference": 5,
+  "clean_counter_flags": [],
+  "induced_fault_counter_changes": [
+    {
+      "label": "fault-0-8-r0",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "fault-0-128-r0",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "fault-1-8-r1",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "fault-1-128-r1",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    }
+  ],
+  "kernel_crash_flags": [],
+  "baseline_restored_both": true,
+  "scope": "Finite host-window RC WRITE correctness/latency, ordering/aliasing, peer-exit/reconnection and model parity on two40G cables/four rails/fixed7.3 core. Not all verbs, DMA-BUF or overnight stability."
+}

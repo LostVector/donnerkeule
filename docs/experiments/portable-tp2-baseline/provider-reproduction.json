@@ -1,0 +1,29 @@
+{
+  "rdma_core_commit": "558104fc33266abe8a9deb50a81769d1a72fbf72",
+  "driver_provider_commit": "7e6c0b3d22507b8cd395faa1f701cbefbb0a757c",
+  "public_patch_series": [
+    {
+      "file": "0001-providers-usb4_rdma-add-USB4-soft-RDMA-provider.patch",
+      "sha256": "eb8baf23b62caf11cb3562338c98893bfcd2715cda0b183793c9eb6a71c1fe84"
+    },
+    {
+      "file": "0002-CMakeLists.txt-build-the-usb4_rdma-provider.patch",
+      "sha256": "a0c60e810d9501544e935f3cb9c289cb66deb1452342da0d728905736ba88075"
+    },
+    {
+      "file": "0003-libibverbs-verbs.h-declare-verbs_provider_usb4_rdma.patch",
+      "sha256": "6d9af74e17c54fc9c0aec54073430ddb2f2b58bc017a734b31a1668043bba581"
+    }
+  ],
+  "applied_files_match_runtime_build_source": {
+    "CMakeLists.txt": true,
+    "libibverbs/verbs.h": true,
+    "providers/usb4_rdma/usb4_rdma.c": true,
+    "providers/usb4_rdma/usb4_rdma.h": true,
+    "providers/usb4_rdma/usb4_rdma_abi.h": true,
+    "providers/usb4_rdma/CMakeLists.txt": true,
+    "providers/usb4_rdma/usb4_rdma.driver": true
+  },
+  "tested_provider_binary_sha256": "e6ad6fad25bfb66446c6d4cfc23551dadb7fc66d7eda06ce101e2c0f69c0708b",
+  "scope": "Public patch application exactly reproduces tested build source; runtime binary equals that build artifact. No claim of reproducible binary hashes across other paths/toolchains."
+}

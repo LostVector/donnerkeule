@@ -1,0 +1,790 @@
+{
+  "model_parity_passed": true,
+  "quality": [
+    {
+      "world": 1,
+      "case": "warmup",
+      "request_index": 0,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 1,
+      "case": "pp32768",
+      "request_index": 0,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 1,
+      "case": "pp2048-tg128",
+      "request_index": 0,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_index": 0,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_index": 1,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 2,
+      "case": "warmup",
+      "request_index": 0,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 2,
+      "case": "pp32768",
+      "request_index": 0,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 2,
+      "case": "pp2048-tg128",
+      "request_index": 0,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_index": 0,
+      "work_matches": true,
+      "output_matches": true
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_index": 1,
+      "work_matches": true,
+      "output_matches": true
+    }
+  ],
+  "strict_phase_policy": {
+    "SLOWDOWN": 0.05,
+    "NOISE_MS": 3
+  },
+  "timing_measurements": [
+    {
+      "world": 1,
+      "case": "warmup",
+      "request_key": [
+        1,
+        "warmup",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 126.320481,
+      "candidate": 237.405277,
+      "noise_floor": 3,
+      "change_percent": 87.93886400733386,
+      "exceeds_margin": true,
+      "status": "inconclusive"
+    },
+    {
+      "world": 1,
+      "case": "warmup",
+      "request_key": [
+        1,
+        "warmup",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 242.38380500000002,
+      "candidate": 251.083899,
+      "noise_floor": 3,
+      "change_percent": 3.5893875005386544,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "warmup",
+      "request_key": [
+        1,
+        "warmup",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 128.3044419997168,
+      "candidate": 239.27064199961023,
+      "noise_floor": 3,
+      "change_percent": 86.48663933251693,
+      "exceeds_margin": true,
+      "status": "inconclusive"
+    },
+    {
+      "world": 1,
+      "case": "warmup",
+      "request_key": [
+        1,
+        "warmup",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 374.09609699898283,
+      "candidate": 492.91638499926194,
+      "noise_floor": 3,
+      "change_percent": 31.76196943872478,
+      "exceeds_margin": true,
+      "status": "inconclusive"
+    },
+    {
+      "world": 1,
+      "case": "pp32768",
+      "request_key": [
+        1,
+        "pp32768",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 19489.887131,
+      "candidate": 19358.283436,
+      "noise_floor": 3,
+      "change_percent": -0.6752409293877992,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "pp32768",
+      "request_key": [
+        1,
+        "pp32768",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 245.887074,
+      "candidate": 245.74761699999996,
+      "noise_floor": 3,
+      "change_percent": -0.056715872750612295,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "pp32768",
+      "request_key": [
+        1,
+        "pp32768",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 19493.87717299942,
+      "candidate": 19363.65693800144,
+      "noise_floor": 3,
+      "change_percent": -0.6680058248153098,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "pp32768",
+      "request_key": [
+        1,
+        "pp32768",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 19744.47533700004,
+      "candidate": 19613.789595001435,
+      "noise_floor": 3,
+      "change_percent": -0.6618851084571831,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "pp2048-tg128",
+      "request_key": [
+        1,
+        "pp2048-tg128",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 1286.493732,
+      "candidate": 1277.537128,
+      "noise_floor": 3,
+      "change_percent": -0.6962026924201115,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "pp2048-tg128",
+      "request_key": [
+        1,
+        "pp2048-tg128",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 3330.6110960000005,
+      "candidate": 3329.5267750000003,
+      "noise_floor": 3,
+      "change_percent": -0.032556217725410175,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "pp2048-tg128",
+      "request_key": [
+        1,
+        "pp2048-tg128",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 1289.2580090010597,
+      "candidate": 1281.0571629997867,
+      "noise_floor": 3,
+      "change_percent": -0.6360903670187157,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "pp2048-tg128",
+      "request_key": [
+        1,
+        "pp2048-tg128",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 4623.608089001209,
+      "candidate": 4612.7433519995975,
+      "noise_floor": 3,
+      "change_percent": -0.23498395176392295,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_key": [
+        1,
+        "short-c2",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 154.518726,
+      "candidate": 154.187517,
+      "noise_floor": 3,
+      "change_percent": -0.2143487773772934,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_key": [
+        1,
+        "short-c2",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 5344.989526000001,
+      "candidate": 5361.349111000002,
+      "noise_floor": 3,
+      "change_percent": 0.3060732845297842,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_key": [
+        1,
+        "short-c2",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 157.45428900117986,
+      "candidate": 157.11709900097048,
+      "noise_floor": 3,
+      "change_percent": -0.21415104177114896,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_key": [
+        1,
+        "short-c2",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 5666.337653001392,
+      "candidate": 5681.7188240002,
+      "noise_floor": 3,
+      "change_percent": 0.27144819000788356,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_key": [
+        1,
+        "short-c2",
+        1
+      ],
+      "metric": "prefill_ms",
+      "baseline": 158.852357,
+      "candidate": 158.190847,
+      "noise_floor": 3,
+      "change_percent": -0.4164307111917953,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_key": [
+        1,
+        "short-c2",
+        1
+      ],
+      "metric": "decode_ms",
+      "baseline": 5347.4074530000025,
+      "candidate": 5364.263047000002,
+      "noise_floor": 3,
+      "change_percent": 0.3152105791105031,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_key": [
+        1,
+        "short-c2",
+        1
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 305.1501579993783,
+      "candidate": 304.439210000055,
+      "noise_floor": 3,
+      "change_percent": -0.23298300219942725,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 1,
+      "case": "short-c2",
+      "request_key": [
+        1,
+        "short-c2",
+        1
+      ],
+      "metric": "wall_ms",
+      "baseline": 5689.070074999108,
+      "candidate": 5705.121656999836,
+      "noise_floor": 3,
+      "change_percent": 0.2821477286994112,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "warmup",
+      "request_key": [
+        2,
+        "warmup",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 151.62283200000002,
+      "candidate": 151.488686,
+      "noise_floor": 3,
+      "change_percent": -0.08847348267444488,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "warmup",
+      "request_key": [
+        2,
+        "warmup",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 178.966667,
+      "candidate": 178.520411,
+      "noise_floor": 3,
+      "change_percent": -0.2493514616327963,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "warmup",
+      "request_key": [
+        2,
+        "warmup",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 160.90900600102032,
+      "candidate": 159.65271399909398,
+      "noise_floor": 3,
+      "change_percent": -0.7807468538574946,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "warmup",
+      "request_key": [
+        2,
+        "warmup",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 342.2303040006227,
+      "candidate": 340.56937400055176,
+      "noise_floor": 3,
+      "change_percent": -0.48532522709267,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "pp32768",
+      "request_key": [
+        2,
+        "pp32768",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 16098.819234999999,
+      "candidate": 16155.938665999998,
+      "noise_floor": 3,
+      "change_percent": 0.3548050957415505,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "pp32768",
+      "request_key": [
+        2,
+        "pp32768",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 188.213973,
+      "candidate": 204.73443,
+      "noise_floor": 3,
+      "change_percent": 8.777486993486928,
+      "exceeds_margin": true,
+      "status": "inconclusive"
+    },
+    {
+      "world": 2,
+      "case": "pp32768",
+      "request_key": [
+        2,
+        "pp32768",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 16118.150071000855,
+      "candidate": 16174.797212999692,
+      "noise_floor": 3,
+      "change_percent": 0.35144940175706463,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "pp32768",
+      "request_key": [
+        2,
+        "pp32768",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 16306.879277999542,
+      "candidate": 16379.73153799976,
+      "noise_floor": 3,
+      "change_percent": 0.4467578299822694,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "pp2048-tg128",
+      "request_key": [
+        2,
+        "pp2048-tg128",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 1139.389133,
+      "candidate": 1141.687595,
+      "noise_floor": 3,
+      "change_percent": 0.20172756904819344,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "pp2048-tg128",
+      "request_key": [
+        2,
+        "pp2048-tg128",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 2904.400451,
+      "candidate": 2879.766011000001,
+      "noise_floor": 3,
+      "change_percent": -0.84817642799625,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "pp2048-tg128",
+      "request_key": [
+        2,
+        "pp2048-tg128",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 1142.9599580005743,
+      "candidate": 1145.5124220010475,
+      "noise_floor": 3,
+      "change_percent": 0.22332050940248038,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "pp2048-tg128",
+      "request_key": [
+        2,
+        "pp2048-tg128",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 4047.615348999898,
+      "candidate": 4025.6672030009213,
+      "noise_floor": 3,
+      "change_percent": -0.5422488084101063,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_key": [
+        2,
+        "short-c2",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 183.945839,
+      "candidate": 182.86886099999998,
+      "noise_floor": 3,
+      "change_percent": -0.5854864702865226,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_key": [
+        2,
+        "short-c2",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 4047.148443000002,
+      "candidate": 4107.117541,
+      "noise_floor": 3,
+      "change_percent": 1.4817617600293653,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_key": [
+        2,
+        "short-c2",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 293.99686999931873,
+      "candidate": 291.83481499967456,
+      "noise_floor": 3,
+      "change_percent": -0.7354006862893447,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_key": [
+        2,
+        "short-c2",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 4443.340458999955,
+      "candidate": 4502.968691998831,
+      "noise_floor": 3,
+      "change_percent": 1.3419685830758032,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_key": [
+        2,
+        "short-c2",
+        1
+      ],
+      "metric": "prefill_ms",
+      "baseline": 181.046466,
+      "candidate": 178.959179,
+      "noise_floor": 3,
+      "change_percent": -1.1529012667941263,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_key": [
+        2,
+        "short-c2",
+        1
+      ],
+      "metric": "decode_ms",
+      "baseline": 4041.907403999998,
+      "candidate": 4098.642822999999,
+      "noise_floor": 3,
+      "change_percent": 1.4036793357476096,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_key": [
+        2,
+        "short-c2",
+        1
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 359.44807099986065,
+      "candidate": 356.8292290001409,
+      "noise_floor": 3,
+      "change_percent": -0.728573112782338,
+      "exceeds_margin": false,
+      "status": "passed"
+    },
+    {
+      "world": 2,
+      "case": "short-c2",
+      "request_key": [
+        2,
+        "short-c2",
+        1
+      ],
+      "metric": "wall_ms",
+      "baseline": 4457.897906000653,
+      "candidate": 4517.431152000427,
+      "noise_floor": 3,
+      "change_percent": 1.335455572449007,
+      "exceeds_margin": false,
+      "status": "passed"
+    }
+  ],
+  "timing_flags": [
+    {
+      "world": 1,
+      "case": "warmup",
+      "request_key": [
+        1,
+        "warmup",
+        0
+      ],
+      "metric": "prefill_ms",
+      "baseline": 126.320481,
+      "candidate": 237.405277,
+      "noise_floor": 3,
+      "change_percent": 87.93886400733386,
+      "exceeds_margin": true,
+      "status": "inconclusive"
+    },
+    {
+      "world": 1,
+      "case": "warmup",
+      "request_key": [
+        1,
+        "warmup",
+        0
+      ],
+      "metric": "client_ttft_ms",
+      "baseline": 128.3044419997168,
+      "candidate": 239.27064199961023,
+      "noise_floor": 3,
+      "change_percent": 86.48663933251693,
+      "exceeds_margin": true,
+      "status": "inconclusive"
+    },
+    {
+      "world": 1,
+      "case": "warmup",
+      "request_key": [
+        1,
+        "warmup",
+        0
+      ],
+      "metric": "wall_ms",
+      "baseline": 374.09609699898283,
+      "candidate": 492.91638499926194,
+      "noise_floor": 3,
+      "change_percent": 31.76196943872478,
+      "exceeds_margin": true,
+      "status": "inconclusive"
+    },
+    {
+      "world": 2,
+      "case": "pp32768",
+      "request_key": [
+        2,
+        "pp32768",
+        0
+      ],
+      "metric": "decode_ms",
+      "baseline": 188.213973,
+      "candidate": 204.73443,
+      "noise_floor": 3,
+      "change_percent": 8.777486993486928,
+      "exceeds_margin": true,
+      "status": "inconclusive"
+    }
+  ],
+  "extra_work_mismatches": [],
+  "counter_flags": [],
+  "scope": "One matched start per binary/world;10 same-world request comparisons.2K prompt ends at96 tokens on original control although maximum128. This is source-package parity, not a throughput improvement or broad model quality claim."
+}

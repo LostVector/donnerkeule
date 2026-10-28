@@ -1,0 +1,838 @@
+diff --git a/src/models/qwen38_flash_next/CMakeLists.txt b/src/models/qwen38_flash_next/CMakeLists.txt
+index 4fe5adb..f33fcd9 100644
+--- a/src/models/qwen38_flash_next/CMakeLists.txt
++++ b/src/models/qwen38_flash_next/CMakeLists.txt
+@@ -20,11 +20,17 @@ if (GUFO_ENABLE_TP2_RDMA)
+     message(FATAL_ERROR
+       "GUFO_ENABLE_TP2_RDMA requires ENGINE_ENABLE_HIP")
+   endif()
++  option(GUFO_TP_TRACE_DIAGNOSTICS
++    "Build bounded TP2 stage telemetry (diagnostic builds only)" OFF)
+   find_package(PkgConfig REQUIRED)
+   pkg_check_modules(IBVERBS REQUIRED IMPORTED_TARGET libibverbs)
+   add_library(gufo_qwen38_flash_next_rdma STATIC
+     kernels/rocm/verbs.cpp)
+   target_compile_features(gufo_qwen38_flash_next_rdma PRIVATE cxx_std_20)
++  if (GUFO_TP_TRACE_DIAGNOSTICS)
++    target_compile_definitions(gufo_qwen38_flash_next_rdma PRIVATE
++      GUFO_TP_TRACE=1)
++  endif()
+   target_include_directories(gufo_qwen38_flash_next_rdma PRIVATE
+     ${PROJECT_SOURCE_DIR})
+   target_link_libraries(gufo_qwen38_flash_next_rdma PRIVATE
+@@ -33,6 +39,18 @@ if (GUFO_ENABLE_TP2_RDMA)
+     gufo_qwen38_flash_next_rdma)
+   target_compile_definitions(gufo_qwen38_flash_next PUBLIC
+     GUFO_ENABLE_TP2_RDMA=1)
++  if (GUFO_BUILD_TOOLS)
++    # Existing two-rank correctness/latency probe, exposed in diagnostic builds
++    # without enabling unrelated model test suites.
++    add_executable(gufo_tp_dispatch_probe EXCLUDE_FROM_ALL
++      ${PROJECT_SOURCE_DIR}/tests/models/qwen38_flash_next/tp_batched_probe.cpp)
++    target_link_libraries(gufo_tp_dispatch_probe PRIVATE
++      gufo_qwen38_flash_next hip::host)
++    add_executable(gufo_head_gather_probe EXCLUDE_FROM_ALL
++      ${PROJECT_SOURCE_DIR}/tests/models/qwen38_flash_next/head_gather_ops_probe.cpp)
++    target_link_libraries(gufo_head_gather_probe PRIVATE
++      gufo_qwen38_flash_next hip::host)
++  endif()
+ endif()
+ 
+ add_library(gufo_qwen38_flash_next_reference STATIC EXCLUDE_FROM_ALL
+diff --git a/src/models/qwen38_flash_next/engine.cpp b/src/models/qwen38_flash_next/engine.cpp
+index 6059bbc..d56b114 100644
+--- a/src/models/qwen38_flash_next/engine.cpp
++++ b/src/models/qwen38_flash_next/engine.cpp
+@@ -227,6 +227,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
+     }
+     exec.all_reduce =
+         rocm::Executor::TwoRankAllReduce(options.communicator, c.hidden_size);
++    exec.head_gather = rocm::Executor::TwoRankHeadGather(options.communicator);
+     exec.reduce_status =
+         rocm::Executor::TwoRankReduceStatus(options.communicator);
+     exec.split_reduce =
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/batch.cpp b/src/models/qwen38_flash_next/kernels/rocm/batch.cpp
+index 7a8840a..1a4f42b 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/batch.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/batch.cpp
+@@ -1126,7 +1126,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
+     UseScratch(base);
+     return HcMixBatch(model_->hc_head(), base.res, false, base.mixed, nullptr,
+                       rows, error) &&
+-           DenseBatch(model_->output(), base.mixed, batch_logits_, rows, error);
++           HeadProjection(base.mixed, batch_logits_, rows, error, true);
+   };
+   bool ok = false;
+   try {
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+index 00349c1..eff6f32 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+@@ -2750,6 +2750,47 @@ Executor::TwoRankAllReduce(std::shared_ptr<Communicator> communicator,
+   };
+ }
+ 
++std::function<bool(float*, std::size_t, std::uint32_t, hipStream_t,
++                   std::string*)>
++Executor::TwoRankHeadGather(std::shared_ptr<Communicator> communicator) {
++  return [communicator = std::move(communicator)](
++             float* data, std::size_t half_values, std::uint32_t rows,
++             hipStream_t stream, std::string* error) {
++    const auto rank = communicator->rank();
++    if (rank > 1 || rows == 0 || half_values == 0 ||
++        half_values > std::numeric_limits<std::size_t>::max() /
++                          (sizeof(float) * std::size_t{rows} * 2)) {
++      AssignError(error, "invalid head gather shape or rank");
++      return false;
++    }
++    const std::size_t half_pitch = half_values * sizeof(float);
++    Communicator::QueuedPartial queued;
++    if (!communicator->QueuePartial(half_pitch * rows, &queued, error))
++      return false;
++    StagePartial(data, queued.send, half_values * rows, queued.arrivals,
++                 queued.ready, queued.value, stream);
++    WaitValue(queued.arrived, queued.value, queued.wait_ticks, queued.timed_out,
++              stream);
++    // Staging consumes the packed local rows before any expansion. Expand
++    // all local rows first so a peer copy cannot overwrite unread sources.
++    for (std::uint32_t row = rows; row-- > 0;) {
++      float* src = data + std::size_t{row} * half_values;
++      float* dst = data + (std::size_t{row} * 2 + rank) * half_values;
++      if (src != dst && !Check(hipMemcpyAsync(dst, src, half_pitch,
++                                              hipMemcpyDeviceToDevice, stream),
++                               "head gather local row placement", error))
++        return false;
++    }
++    // Existing queued-window lifetime and Drain/CheckQueued failure handling
++    // apply. Copying, rather than adding, retains the original logit bits.
++    return Check(
++        hipMemcpy2DAsync(data + std::size_t{1 - rank} * half_values,
++                         half_pitch * 2, queued.peer, half_pitch, half_pitch,
++                         rows, hipMemcpyDeviceToDevice, stream),
++        "head gather peer row placement", error);
++  };
++}
++
+ std::function<bool(std::string*)> Executor::TwoRankReduceStatus(
+     std::shared_ptr<Communicator> communicator) {
+   return [communicator = std::move(communicator)](std::string* error) {
+@@ -2813,6 +2854,39 @@ bool Executor::AllReduce(float* data, std::size_t rows, std::string* error_msg,
+   return true;
+ }
+ 
++// Isolated experiment: retain full allocation, shard one/two-row Q8 heads.
++// Larger batches keep the baseline path because measured communication costs
++// erase the gain or worsen tails. No graph/collective protocol is changed.
++bool Executor::HeadProjection(const float* x, float* out, std::uint32_t rows,
++                              std::string* error, bool batched) const {
++  const auto& full = model_->output();
++  if (model_->tp_world_size() != 2 || (rows != 1 && rows != 2) ||
++      full.type != core::GgmlType::kQ8_0 || full.rows != 248320 ||
++      full.cols != 2560 || config().hidden_size != 2560) {
++    return batched ? DenseBatch(full, x, out, rows, error)
++                   : Dense(full, x, out, rows, error);
++  }
++  const auto rank = model_->tp_rank();
++  if (rank >= 2) {
++    if (error)
++      *error = "experimental output-head rank out of range";
++    return false;
++  }
++  constexpr std::size_t kQ8BlockValues = 32, kQ8BlockBytes = 34;
++  DeviceTensor part = full;
++  part.rows /= 2;
++  part.data = static_cast<std::uint8_t*>(full.data) +
++              std::size_t{rank} * part.rows * (full.cols / kQ8BlockValues) *
++                  kQ8BlockBytes;
++  if (!Dense(part, x, out, rows, error))
++    return false;
++  if (!options_.head_gather) {
++    AssignError(error, "experimental head gather callback is missing");
++    return false;
++  }
++  return options_.head_gather(out, part.rows, rows, stream_, error);
++}
++
+ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
+                    std::uint32_t n_tokens, std::string* error_msg,
+                    bool last_only, bool reduce) const {
+@@ -3612,7 +3686,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
+     if (!HcMix(model_->hc_head(),
+                s_.res + std::size_t{checkpoint->tokens - 1} * c.HcDim(), false,
+                s_.mixed, nullptr, 1, error_msg) ||
+-        !Dense(model_->output(), s_.mixed, s_.logits, 1, error_msg) ||
++        !HeadProjection(s_.mixed, s_.logits, 1, error_msg) ||
+         !Check(hipMemcpyAsync(checkpoint->logits.data(), s_.logits,
+                               std::size_t{c.vocab_size} * sizeof(float),
+                               hipMemcpyDeviceToHost, stream_),
+@@ -3640,7 +3714,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
+     const DeviceMixer& head = model_->hc_head();
+     if (!HcMix(head, s_.res + skip * c.HcDim(), false, s_.mixed, nullptr,
+                n_logits, error_msg) ||
+-        !Dense(model_->output(), s_.mixed, s_.logits, n_logits, error_msg)) {
++        !HeadProjection(s_.mixed, s_.logits, n_logits, error_msg)) {
+       return false;
+     }
+     if (download_logits &&
+@@ -3878,7 +3952,7 @@ bool Executor::ForwardPair(Session& session,
+     const std::size_t skip = static_cast<std::size_t>(n_b - n_logits);
+     if (!HcMix(model_->hc_head(), s_.res + skip * hc_dim, false, s_.mixed,
+                nullptr, n_logits, error_msg) ||
+-        !Dense(model_->output(), s_.mixed, s_.logits, n_logits, error_msg) ||
++        !HeadProjection(s_.mixed, s_.logits, n_logits, error_msg) ||
+         (logits != nullptr &&
+          !Check(hipMemcpyAsync(logits_host_, s_.logits,
+                                static_cast<std::size_t>(n_logits) *
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.hpp b/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
+index f021db8..9939401 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
+@@ -262,6 +262,9 @@ public:
+     /// callback is required only when DeviceModel carries world_size > 1.
+     std::function<bool(float*, std::size_t, hipStream_t, std::string*)>
+         all_reduce;
++    std::function<bool(float*, std::size_t, std::uint32_t, hipStream_t,
++                       std::string*)>
++        head_gather;
+     /// The same sum, split. When set, a prefill chunk holds two trunk
+     /// batches that run a layer apart, so each batch's exchange overlaps the
+     /// other's computation (see PrefillChunk).
+@@ -287,6 +290,9 @@ public:
+                                           std::string*)>
+   TwoRankAllReduce(std::shared_ptr<Communicator> communicator,
+                    std::uint32_t hidden);
++  [[nodiscard]] static std::function<bool(float*, std::size_t, std::uint32_t,
++                                          hipStream_t, std::string*)>
++  TwoRankHeadGather(std::shared_ptr<Communicator> communicator);
+   [[nodiscard]] static std::function<bool(std::string*)> TwoRankReduceStatus(
+       std::shared_ptr<Communicator> communicator);
+   /// The overlapped form of TwoRankAllReduce.
+@@ -702,6 +708,9 @@ private:
+   bool Run(Session& session, std::uint64_t key, bool graph,
+            const std::function<bool()>& body, std::string* error_msg,
+            bool synchronize = true) const;
++  bool HeadProjection(const float* x, float* out, std::uint32_t rows,
++                      std::string* error, bool batched = false) const;
++
+   /// Waits for the stream, then for the outcome of the sums queued on it.
+   bool Drain(const char* what, std::string* error_msg) const;
+ 
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/tp_trace.hpp b/src/models/qwen38_flash_next/kernels/rocm/tp_trace.hpp
+new file mode 100644
+index 0000000..67429fa
+--- /dev/null
++++ b/src/models/qwen38_flash_next/kernels/rocm/tp_trace.hpp
+@@ -0,0 +1,177 @@
++#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_TP_TRACE_HPP_
++#define GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_TP_TRACE_HPP_
++
++// Investigation-only, bounded telemetry. Compile without GUFO_TP_TRACE to erase
++// the instrumentation. No logging, allocation or additional locks per exchange.
++#include <unistd.h>
++
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <memory>
++#include <new>
++#include <string>
++
++namespace gufo::models::qwen38_flash_next::rocm {
++class TpTrace {
++public:
++  enum Stage : std::size_t {
++    kEnter,
++    kLocked,
++    kJobPublished,
++    kQueued,
++    kWorker,
++    kWorkerChecked,
++    kReady,
++    kPostBegin,
++    kPostEnd,
++    kPeerCq,
++    kSendCq,
++    kPriorSendsRetired,
++    kTransferDone,
++    kPublished,
++    kFailure,
++    kStageCount
++  };
++  inline static constexpr std::array<const char*, kStageCount> kNames = {
++      "queue_enter_ns",        "queue_locked_ns",      "job_published_ns",
++      "queue_done_ns",         "worker_dequeued_ns",   "worker_checked_ns",
++      "gpu_ready_observed_ns", "post_begin_ns",        "post_end_ns",
++      "peer_cq_observed_ns",   "send_cq_observed_ns",  "prior_sends_retired_ns",
++      "transfer_validated_ns", "arrival_published_ns", "failure_ns"};
++  explicit TpTrace(std::uint32_t rank) {
++#ifdef GUFO_TP_TRACE
++    const char* prefix = std::getenv("GUFO_TP_TRACE_PREFIX");
++    if (prefix == nullptr || *prefix == '\0')
++      return;
++    constexpr std::size_t kDefaultCapacity = 65536;
++    capacity_ = kDefaultCapacity;
++    if (const char* value = std::getenv("GUFO_TP_TRACE_CAPACITY")) {
++      char* end = nullptr;
++      const auto parsed = std::strtoull(value, &end, 10);
++      if (end == value || *end != '\0' || parsed == 0 || parsed > 1048576) {
++        std::fprintf(
++            stderr, "TP trace: invalid bounded capacity; telemetry disabled\n");
++        capacity_ = 0;
++        return;
++      }
++      capacity_ = static_cast<std::size_t>(parsed);
++    }
++    path_ = std::string(prefix) + ".rank" + std::to_string(rank) + ".pid" +
++            std::to_string(static_cast<unsigned long>(::getpid())) + ".csv";
++    records_.reset(new (std::nothrow) Record[capacity_]);
++    if (!records_) {
++      std::fprintf(stderr, "TP trace: allocation failed; telemetry disabled\n");
++      capacity_ = 0;
++    }
++#else
++    (void)rank;
++#endif
++  }
++  [[nodiscard]] std::uint64_t Now() const noexcept {
++#ifdef GUFO_TP_TRACE
++    if (records_)
++      return Clock();
++#endif
++    return 0;
++  }
++  void Begin(std::uint64_t operation, std::uint64_t scope, std::size_t bytes,
++             std::uint64_t enter, std::uint64_t locked) noexcept {
++#ifdef GUFO_TP_TRACE
++    if (!records_)
++      return;
++    if (operation >= capacity_) {
++      dropped_.fetch_add(1, std::memory_order_relaxed);
++      return;
++    }
++    auto& r = records_[operation];
++    r.scope = scope;
++    r.bytes = bytes;
++    // Do not clear timestamps: a peer CQ can be observed one operation early.
++    r.ns[kEnter].store(enter, std::memory_order_relaxed);
++    r.ns[kLocked].store(locked, std::memory_order_relaxed);
++    r.begun.store(true, std::memory_order_release);
++#else
++    (void)operation;
++    (void)scope;
++    (void)bytes;
++    (void)enter;
++    (void)locked;
++#endif
++  }
++  void Stamp(std::uint64_t operation, Stage stage) noexcept {
++#ifdef GUFO_TP_TRACE
++    if (records_ && operation < capacity_) {
++      auto& slot = records_[operation].ns[stage];
++      std::uint64_t empty = 0;
++      // First observation wins, including an early completion.
++      slot.compare_exchange_strong(empty, Clock(), std::memory_order_relaxed);
++    }
++#else
++    (void)operation;
++    (void)stage;
++#endif
++  }
++  // Call only after producers/worker are quiescent. Never dump under a hot
++  // lock.
++  void Dump() noexcept {
++#ifdef GUFO_TP_TRACE
++    if (!records_ || dumped_)
++      return;
++    dumped_ = true;
++    // Exclusive creation avoids overwriting a trace from another communicator.
++    FILE* file = std::fopen(path_.c_str(), "wx");
++    if (file == nullptr) {
++      std::perror("TP trace output");
++      return;
++    }
++    std::fprintf(file, "operation,scope,bytes");
++    for (const auto* name : kNames)
++      std::fprintf(file, ",%s", name);
++    std::fprintf(file, "\n");
++    for (std::size_t i = 0; i < capacity_; ++i) {
++      const auto& r = records_[i];
++      if (!r.begun.load(std::memory_order_acquire))
++        continue;
++      std::fprintf(file, "%zu,%llu,%llu", i,
++                   static_cast<unsigned long long>(r.scope),
++                   static_cast<unsigned long long>(r.bytes));
++      for (const auto& stamp : r.ns)
++        std::fprintf(file, ",%llu",
++                     static_cast<unsigned long long>(
++                         stamp.load(std::memory_order_relaxed)));
++      std::fprintf(file, "\n");
++    }
++    std::fclose(file);
++    std::fprintf(stderr, "TP trace: %s capacity=%zu dropped=%llu\n",
++                 path_.c_str(), capacity_,
++                 static_cast<unsigned long long>(dropped_.load()));
++#endif
++  }
++
++private:
++#ifdef GUFO_TP_TRACE
++  static std::uint64_t Clock() noexcept {
++    return static_cast<std::uint64_t>(
++        std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now().time_since_epoch())
++            .count());
++  }
++  static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
++  struct Record {
++    std::uint64_t scope{0}, bytes{0};
++    std::array<std::atomic<std::uint64_t>, kStageCount> ns{};
++    std::atomic<bool> begun{false};
++  };
++  std::unique_ptr<Record[]> records_;
++  std::string path_;
++  std::size_t capacity_{0};
++  std::atomic<std::uint64_t> dropped_{0};
++  bool dumped_{false};
++#endif
++};
++}  // namespace gufo::models::qwen38_flash_next::rocm
++#endif
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp b/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
+index c6dd447..57903de 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/verbs.cpp
+@@ -1,5 +1,10 @@
+ #include "src/models/qwen38_flash_next/kernels/rocm/verbs.hpp"
+ 
++#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
++#ifdef GUFO_TP_TRACE
++#include "src/models/qwen38_flash_next/kernels/rocm/tp_trace.hpp"
++#endif
++
+ #include <arpa/inet.h>
+ #include <fcntl.h>
+ #include <infiniband/verbs.h>
+@@ -491,7 +496,14 @@ static_assert(sizeof(CollectiveHeader) <= kDataOffset);
+ 
+ class Ibrverbs final : public Communicator {
+ public:
+-  explicit Ibrverbs(const IbrverbsConfig& config) : config_(config) {}
++  explicit Ibrverbs(const IbrverbsConfig& config)
++      : config_(config)
++#ifdef GUFO_TP_TRACE
++        ,
++        trace_(config.rank)
++#endif
++  {
++  }
+   ~Ibrverbs() override { Cleanup(); }
+ 
+   Ibrverbs(const Ibrverbs&) = delete;
+@@ -844,7 +856,13 @@ public:
+   [[nodiscard]] bool StartPartial(const float* data, std::size_t bytes,
+                                   hipStream_t stream,
+                                   std::string* error) override {
++#ifdef GUFO_TP_TRACE
++    const auto trace_enter = trace_.Now();
++#endif
+     std::lock_guard lock(mutex_);
++#ifdef GUFO_TP_TRACE
++    const auto trace_locked = trace_.Now();
++#endif
+     if (!CheckExchange(data, bytes, error)) {
+       return false;
+     }
+@@ -859,6 +877,9 @@ public:
+     // At most kStartedExchanges are in flight, so the exchange that last used
+     // this event has finished and the worker no longer waits on it.
+     const std::uint64_t operation_id = next_operation_;
++#ifdef GUFO_TP_TRACE
++    trace_.Begin(operation_id, *bound_scope_, bytes, trace_enter, trace_locked);
++#endif
+     hipEvent_t ready = ready_events_[operation_id % kStartedExchanges];
+     if (hipEventRecord(ready, stream) != hipSuccess) {
+       Poison(error, "overlapped exchange event record failed");
+@@ -871,10 +892,16 @@ public:
+                        .bytes = bytes,
+                        .scope_id = *bound_scope_,
+                        .operation_id = operation_id});
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(operation_id, TpTrace::kJobPublished);
++#endif
+     }
+     ++next_operation_;
+     ++started_;
+     jobs_ready_.notify_one();
++#ifdef GUFO_TP_TRACE
++    trace_.Stamp(operation_id, TpTrace::kQueued);
++#endif
+     return true;
+   }
+ 
+@@ -908,7 +935,13 @@ public:
+ 
+   [[nodiscard]] bool QueuePartial(std::size_t bytes, QueuedPartial* partial,
+                                   std::string* error) override {
++#ifdef GUFO_TP_TRACE
++    const auto trace_enter = trace_.Now();
++#endif
+     std::lock_guard lock(mutex_);
++#ifdef GUFO_TP_TRACE
++    const auto trace_locked = trace_.Now();
++#endif
+     if (!CheckExchange(static_cast<const float*>(send_device_), bytes, error)) {
+       return false;
+     }
+@@ -921,6 +954,9 @@ public:
+       return false;
+     }
+     const std::uint64_t operation_id = next_operation_;
++#ifdef GUFO_TP_TRACE
++    trace_.Begin(operation_id, *bound_scope_, bytes, trace_enter, trace_locked);
++#endif
+     const std::size_t window = (operation_id % kWindows) * kWindowBytes;
+     auto* flags = static_cast<std::uint8_t*>(flags_device_);
+     *partial = {
+@@ -943,10 +979,16 @@ public:
+                        .scope_id = *bound_scope_,
+                        .operation_id = operation_id,
+                        .queued = true});
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(operation_id, TpTrace::kJobPublished);
++#endif
+     }
+     ++next_operation_;
+     ++queued_;
+     jobs_ready_.notify_one();
++#ifdef GUFO_TP_TRACE
++    trace_.Stamp(operation_id, TpTrace::kQueued);
++#endif
+     return true;
+   }
+ 
+@@ -1241,10 +1283,16 @@ private:
+     wr.wr.rdma.remote_addr = remote_recv_address_ + window;
+     wr.wr.rdma.rkey = remote_recv_rkey_;
+     ibv_send_wr* bad = nullptr;
++#ifdef GUFO_TP_TRACE
++    trace_.Stamp(operation_id, TpTrace::kPostBegin);
++#endif
+     if (ibv_post_send(qp_, &wr, &bad) != 0) {
+       SetError(error, "ibv_post_send failed");
+       return nullptr;
+     }
++#ifdef GUFO_TP_TRACE
++    trace_.Stamp(operation_id, TpTrace::kPostEnd);
++#endif
+     if (!WaitForExchange(operation_id, ExpectedReceive{}, error)) {
+       return nullptr;
+     }
+@@ -1302,10 +1350,16 @@ private:
+     wr.opcode = IBV_WR_SEND_WITH_IMM;
+     wr.imm_data = htonl(ExchangeImmediate(scope_id, operation_id));
+     ibv_send_wr* bad = nullptr;
++#ifdef GUFO_TP_TRACE
++    trace_.Stamp(operation_id, TpTrace::kPostBegin);
++#endif
+     if (ibv_post_send(qp_, &wr, &bad) != 0) {
+       SetError(error, "ibv_post_send failed");
+       return nullptr;
+     }
++#ifdef GUFO_TP_TRACE
++    trace_.Stamp(operation_id, TpTrace::kPostEnd);
++#endif
+     const ExpectedReceive expected{
+         .immediate = ExchangeImmediate(scope_id, operation_id),
+         .length = static_cast<std::uint32_t>(length),
+@@ -1368,6 +1422,9 @@ private:
+         job = jobs_.front();
+         jobs_.pop_front();
+       }
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(job.operation_id, TpTrace::kWorker);
++#endif
+       Finished finished{.bytes = job.bytes};
+       std::string poisoned;
+       {
+@@ -1376,26 +1433,34 @@ private:
+           PoisonedError(&poisoned);
+         }
+       }
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(job.operation_id, TpTrace::kWorkerChecked);
++#endif
+       if (!poisoned.empty()) {
+         finished.error = std::move(poisoned);
+       } else if (job.queued) {
+         if (WaitReady(job.operation_id + 1, &finished.error)) {
++#ifdef GUFO_TP_TRACE
++          trace_.Stamp(job.operation_id, TpTrace::kReady);
++#endif
+           finished.peer = Transfer(job.scope_id, job.operation_id, job.bytes,
+                                    &finished.error);
+         }
+-      } else if (!device ||
+-                 hipStreamWaitEvent(copy_stream_, job.ready, 0) != hipSuccess ||
+-                 (job.bytes != 0 &&
+-                  hipMemcpyAsync(SendWindow(job.operation_id) + data_offset_,
+-                                 job.data, job.bytes, StagingKind(),
+-                                 copy_stream_) != hipSuccess) ||
+-                 hipStreamSynchronize(copy_stream_) != hipSuccess) {
+-        finished.error = "HIP overlapped staging failed";
++      } else if (!device || !StageStarted(job, &finished.error)) {
++        if (finished.error.empty())
++          finished.error = "HIP overlapped staging failed";
+       } else {
++#ifdef GUFO_TP_TRACE
++        trace_.Stamp(job.operation_id, TpTrace::kReady);
++#endif
+         finished.peer = Transfer(job.scope_id, job.operation_id, job.bytes,
+                                  &finished.error);
+       }
+       const bool failed = finished.peer == nullptr;
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(job.operation_id,
++                   failed ? TpTrace::kFailure : TpTrace::kTransferDone);
++#endif
+       if (failed || job.queued) {
+         std::lock_guard lock(mutex_);
+         if (failed) {
+@@ -1417,16 +1482,48 @@ private:
+             .store(failed ? std::numeric_limits<std::uint64_t>::max()
+                           : job.operation_id + 1,
+                    std::memory_order_release);
++#ifdef GUFO_TP_TRACE
++        trace_.Stamp(job.operation_id, TpTrace::kPublished);
++#endif
+         continue;
+       }
+       {
+         std::lock_guard jobs(jobs_mutex_);
+         finished_.push_back(std::move(finished));
+       }
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(job.operation_id, TpTrace::kPublished);
++#endif
+       finished_ready_.notify_all();
+     }
+   }
+ 
++  // The stock host window is GPU-mapped. Reuse the queued path's exact
++  // copy and system-scope release instead of parking in a HIP stream wait.
++  // The worker submits one copy at a time; no other staging kernel shares
++  // the block counter until this ready flag has been acquired.
++  [[nodiscard]] bool StageStarted(const Job& job, std::string* error) {
++    if (hipStreamWaitEvent(copy_stream_, job.ready, 0) != hipSuccess)
++      return false;
++    if (gpu_windows_) {
++      return (job.bytes == 0 ||
++              hipMemcpyAsync(SendWindow(job.operation_id) + data_offset_,
++                             job.data, job.bytes, StagingKind(),
++                             copy_stream_) == hipSuccess) &&
++             hipStreamSynchronize(copy_stream_) == hipSuccess;
++    }
++    const auto window = (job.operation_id % kWindows) * kWindowBytes;
++    auto* send = reinterpret_cast<float*>(
++        static_cast<std::uint8_t*>(send_device_) + window + data_offset_);
++    auto* ready = reinterpret_cast<std::uint64_t*>(
++        static_cast<std::uint8_t*>(flags_device_) + kReadyOffset);
++    StagePartial(job.data, send, job.bytes / sizeof(float),
++                 static_cast<std::uint32_t*>(arrivals_), ready,
++                 job.operation_id + 1, copy_stream_);
++    return hipGetLastError() == hipSuccess &&
++           WaitReady(job.operation_id + 1, error);
++  }
++
+   void StopWorker() noexcept {
+     {
+       std::lock_guard jobs(jobs_mutex_);
+@@ -1516,6 +1613,9 @@ private:
+         SetError(error, "verbs send completion is out of order");
+         return false;
+       }
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(sends_done_, TpTrace::kSendCq);
++#endif
+       ++sends_done_;
+       return true;
+     }
+@@ -1536,9 +1636,15 @@ private:
+                               " expected " + std::to_string(expected.length));
+           return false;
+         }
++#ifdef GUFO_TP_TRACE
++        trace_.Stamp(operation, TpTrace::kPeerCq);
++#endif
+         *received = true;
+       } else if (completion.wr_id == (kRecvTag | (operation + 1)) &&
+                  !early_receive_) {
++#ifdef GUFO_TP_TRACE
++        trace_.Stamp(operation + 1, TpTrace::kPeerCq);
++#endif
+         early_receive_ = true;
+         early_immediate_ = imm;
+         early_length_ = completion.byte_len;
+@@ -1558,9 +1664,15 @@ private:
+     }
+     const std::uint32_t imm = ntohl(completion.imm_data);
+     if (imm == static_cast<std::uint32_t>(operation)) {
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(operation, TpTrace::kPeerCq);
++#endif
+       *received = true;
+     } else if (imm == static_cast<std::uint32_t>(operation + 1) &&
+                !early_receive_) {
++#ifdef GUFO_TP_TRACE
++      trace_.Stamp(operation + 1, TpTrace::kPeerCq);
++#endif
+       early_receive_ = true;
+     } else {
+       SetError(error, "verbs peer write is out of order");
+@@ -1678,12 +1790,18 @@ private:
+         ibv_ack_cq_events(cq_, 1);
+       }
+     }
++#ifdef GUFO_TP_TRACE
++    trace_.Stamp(operation, TpTrace::kPriorSendsRetired);
++#endif
+     return true;
+   }
+ 
+   void Cleanup() noexcept {
+     // The worker uses the queue pair and buffers until it stops.
+     StopWorker();
++#ifdef GUFO_TP_TRACE
++    trace_.Dump();
++#endif
+     control_.reset();
+     if (qp_ != nullptr) {
+       ibv_destroy_qp(qp_);
+@@ -1736,6 +1854,9 @@ private:
+   }
+ 
+   IbrverbsConfig config_;
++#ifdef GUFO_TP_TRACE
++  [[no_unique_address]] TpTrace trace_;
++#endif
+   ibv_context* context_{nullptr};
+   ibv_pd* pd_{nullptr};
+   ibv_cq* cq_{nullptr};
+diff --git a/tests/models/qwen38_flash_next/head_gather_ops_probe.cpp b/tests/models/qwen38_flash_next/head_gather_ops_probe.cpp
+new file mode 100644
+index 0000000..432b40b
+--- /dev/null
++++ b/tests/models/qwen38_flash_next/head_gather_ops_probe.cpp
+@@ -0,0 +1,110 @@
++// Two-host head-gather correctness probe. Uses real registered host windows;
++// the independent CPU oracle is row-wise rank0/rank1 concatenation.
++#include <hip/hip_runtime.h>
++
++#include <algorithm>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++#include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
++#include "src/models/qwen38_flash_next/kernels/rocm/verbs.hpp"
++
++namespace q = gufo::models::qwen38_flash_next::rocm;
++namespace {
++void Require(bool value, const char* what) {
++  if (!value)
++    throw std::runtime_error(what);
++}
++void Check(hipError_t result) {
++  if (result != hipSuccess)
++    throw std::runtime_error(hipGetErrorString(result));
++}
++std::uint32_t Pattern(std::uint32_t rank, std::uint32_t row, std::size_t i,
++                      std::uint32_t repetition) {
++  if (i % 97 == 0)
++    return 0x80000000U;
++  if (i % 97 == 1)
++    return 0x7fc01234U + rank;
++  return 0x3f000000U |
++         ((rank * 123457U + row * 65537U + i * 31U + repetition * 7919U) &
++          0x7fffffU);
++}
++struct DeviceBuffer {
++  float* data = nullptr;
++  explicit DeviceBuffer(std::size_t count) {
++    Check(hipMalloc(&data, count * sizeof(float)));
++  }
++  ~DeviceBuffer() { (void)hipFree(data); }
++};
++}  // namespace
++
++int main(int argc, char** argv) {
++  try {
++    Require(argc == 4,
++            "usage: gufo_head_gather_probe rank head-ip rdma-device");
++    const auto rank = static_cast<std::uint32_t>(std::stoul(argv[1]));
++    Require(rank < 2, "rank must be 0 or 1");
++    Check(hipSetDevice(0));
++    q::IbrverbsConfig config;
++    config.rank = rank;
++    config.bootstrap_host = argv[2];
++    config.bootstrap_port = 29627;
++    config.rdma_device = argv[3];
++    std::string error;
++    auto comm = q::CreateIbrverbsCommunicator(config, &error);
++    if (!comm)
++      throw std::runtime_error(error);
++    auto gather = q::Executor::TwoRankHeadGather(comm);
++    hipStream_t stream{};
++    Check(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
++    std::uint64_t scope = 1000;
++    std::size_t cases = 0;
++    for (const std::uint32_t rows : {1U, 2U}) {
++      for (const std::size_t half : {1U, 32U, 257U, 65537U, 124160U}) {
++        const auto count = std::size_t(rows) * half * 2;
++        DeviceBuffer buffer(count + 16);
++        std::vector<std::uint32_t> input(count + 16, 0xcdcdcdcdU);
++        std::vector<std::uint32_t> actual(count + 16);
++        for (std::uint32_t rep = 0; rep < 4; ++rep) {
++          std::fill(input.begin(), input.end(), 0xcdcdcdcdU);
++          for (std::uint32_t row = 0; row < rows; ++row)
++            for (std::size_t i = 0; i < half; ++i)
++              input[std::size_t(row) * half + i] = Pattern(rank, row, i, rep);
++          Check(hipMemcpyAsync(buffer.data, input.data(), input.size() * 4,
++                               hipMemcpyHostToDevice, stream));
++          if (!comm->BeginOperation(scope, &error))
++            throw std::runtime_error(error);
++          if (!gather(buffer.data, half, rows, stream, &error))
++            throw std::runtime_error(error);
++          Check(hipStreamSynchronize(stream));
++          if (!comm->CheckQueued(&error))
++            throw std::runtime_error(error);
++          if (!comm->EndOperation(scope++, &error))
++            throw std::runtime_error(error);
++          Check(hipMemcpy(actual.data(), buffer.data, actual.size() * 4,
++                          hipMemcpyDeviceToHost));
++          for (std::uint32_t row = 0; row < rows; ++row)
++            for (std::uint32_t peer = 0; peer < 2; ++peer)
++              for (std::size_t i = 0; i < half; ++i)
++                Require(actual[(std::size_t(row) * 2 + peer) * half + i] ==
++                            Pattern(peer, row, i, rep),
++                        "CPU concatenation oracle mismatch");
++          for (std::size_t i = count; i < actual.size(); ++i)
++            Require(actual[i] == 0xcdcdcdcdU, "output guard overwritten");
++          ++cases;
++        }
++      }
++    }
++    Check(hipStreamDestroy(stream));
++    std::printf("rank=%u cases=%zu bitwise_concat=pass guards=pass\n", rank,
++                cases);
++    return 0;
++  } catch (const std::exception& error) {
++    std::fprintf(stderr, "%s\n", error.what());
++    return 1;
++  }
++}
