@@ -72,3 +72,9 @@ Exact raw results and controllers are retained on the test hosts at
 Published summaries: [serving CSV](link40-serving.csv), [prefill/CPU CSV](link40-prefill-cpu.csv).
 The pinned private Gufo/driver stack is not a fresh-checkout reproduction promise.
 Use [the launch guide](../TP2_TUNING.md) for supported starting profiles.
+
+## Level1Techs follow-up
+
+[Post22 and earlier discussion](https://forum.level1techs.com/t/benchmarking-usb4-performance-on-strix-halo/245299/22) provide useful leads. Both live endpoints already report `nhi_interrupt_throttle_ns=0`; our driver uses the optional kernel ring-throttling API before starting rings. The old128us stock setting is therefore not an untried fix. Local kernel TB_MAX_FRAME_SIZE is4096: larger verbs messages still require multiple descriptors. The thread's78Gb/s claim is not independently verified here. Ring occupancy, descriptor/credit turnover and batching are better next measurements than another blind TX-window increase. No kernel/boot/power settings changed.
+
+A512KiB completion-audit exchange adds8,000 endpoint payload checks. Hot host RTT p50/p95/p99=649.37/766.04/809.01us; GPU-staged728.93/765.10/831.47us. These include peer validation and GPU fences, not just wire time. The counter audit now covers62 snapshot pairs, with no tracked increases.
