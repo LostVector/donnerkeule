@@ -52,6 +52,10 @@ static uint native_rx_active_poll_us;
 module_param(native_rx_active_poll_us, uint, 0444);
 MODULE_PARM_DESC(native_rx_active_poll_us,
 		 "Bounded native RX active polling in us (clamped to 1000; default off)");
+static bool native_rx_active_poll_full;
+module_param(native_rx_active_poll_full, bool, 0444);
+MODULE_PARM_DESC(native_rx_active_poll_full,
+                 "Use full native RX active polling window for small batches (default adaptive)");
 #define TBV_RX_PROGRESS_BUDGET 256
 static atomic64_t native_rx_progress_irqs, native_rx_progress_runs;
 static atomic64_t native_rx_progress_frames, native_rx_progress_empty;
@@ -61,6 +65,7 @@ void tbv_native_rx_progress_debugfs_show(struct seq_file *s)
 {
 	seq_printf(s, "native_rx_progress: %u\n", native_rx_progress);
 	seq_printf(s, "native_rx_active_poll_us: %u\n", min_t(u32, native_rx_active_poll_us, 1000));
+	seq_printf(s, "native_rx_active_poll_full: %u\n", native_rx_active_poll_full);
 	seq_printf(s, "native_rx_recheck_ms: %u\n", native_rx_recheck_ms);
 	seq_printf(s, "native_rx_progress_irqs: %lld\n", atomic64_read(&native_rx_progress_irqs));
 	seq_printf(s, "native_rx_progress_runs: %lld\n", atomic64_read(&native_rx_progress_runs));
@@ -111,10 +116,11 @@ static void tbv_path_rx_progress_work(struct work_struct *work)
 	while (n < TBV_RX_PROGRESS_BUDGET &&
 	       READ_ONCE(path->rx_progress_enabled)) {
 		frame = tb_ring_poll(path->rx_ring);
-		/* Use a short window for small batches and the configured cap
-		 * for bursts. Neither window resets the entry timestamp. */
+		/* Adaptive mode shortens small batches; full mode uses the cap.
+		 * Neither mode resets the entry timestamp or spins on idle entry. */
 		if (!frame &&
-		    tbv_rx_active_poll_again(tbv_rx_active_window_us(active_us, n),
+		    tbv_rx_active_poll_again(tbv_rx_active_window_us(active_us, n,
+					     native_rx_active_poll_full),
 					     n, TBV_RX_PROGRESS_BUDGET,
 					     READ_ONCE(path->rx_progress_enabled),
 					     active_start,

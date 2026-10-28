@@ -104,10 +104,18 @@ Choose a policy deliberately:
 
 - **Off (`native_rx_active_poll_us=0`)**: conservative default/restore policy.
 - **Adaptive cap100 in this branch**: lower-CPU experimental compromise.
-- Historical full100us on every nonempty batch was a **different private
-  module**, not another flag in this final branch. It used more CPU and
-  sometimes delivered slightly higher prefill; do not label it a selectable
-  profile here.
+- **Full cap100**: add `native_rx_active_poll_full=1` alongside
+  `native_rx_active_poll_us=100`. This keeps the full window even for small
+  nonempty batches. It never spins on empty entry, extends the deadline per
+  packet, or removes the 256-frame batch budget. The default is `0` (adaptive).
+  Both flags are load-time options, requiring a safe reload after QPs close.
+
+The historical private full100 build measured about 2.4% higher prefill than
+adaptive in their direct comparison, with EVO whole-system CPU averaging 3.77
+versus 2.98 logical cores during the **short-decode** test. Those CPU figures
+are not prefill-specific or a sum across both hosts. This public selectable
+mode restores that polling-window policy, but has not yet been hardware-tested
+as this exact build; it does not inherit the private build's qualification.
 
 All experimental policies still have request-latency failures. Our machines
 were restored to baseline after testing; no policy is promoted as production-safe.

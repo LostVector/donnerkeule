@@ -27,6 +27,7 @@ struct tbv_perf_id {u32 rail;u64 token;};
 static _Atomic long native_rx_progress_irqs,native_rx_progress_runs,native_rx_progress_frames,native_rx_progress_empty,native_rx_progress_budget;
 static void atomic64_inc(_Atomic long *v){atomic_fetch_add(v,1);}static void atomic64_add(unsigned n,_Atomic long *v){atomic_fetch_add(v,n);}
 static unsigned native_rx_active_poll_us;
+static bool native_rx_active_poll_full;
 static u64 fake_ns;
 static unsigned relax_calls;
 static u64 ktime_get_ns(void){fake_ns+=1000;return fake_ns;}
@@ -71,9 +72,18 @@ int main(void){
  ring.next=1017;next_expected=1017;fake_ns=0;relax_calls=0;
  run(&path);assert(callbacks==1034 && next_expected==1025);
  assert(relax_calls==99 && fake_ns==101000);
+ /* Full mode extends a one-frame batch, but not an empty entry. */
+ native_rx_active_poll_full=true;ring.next=1024;next_expected=1024;
+ fake_ns=0;relax_calls=0;run(&path);
+ assert(callbacks==1035 && relax_calls==99 && fake_ns==101000);
+ relax_calls=0;run(&path);assert(!relax_calls);
+ /* The polling window remains disabled when its duration is zero. */
+ native_rx_active_poll_us=0;ring.next=1024;next_expected=1024;
+ relax_calls=0;run(&path);assert(callbacks==1036 && !relax_calls);
  tbv_path_rx_progress_disable(&path);
  for(unsigned us=0;us<=1000;us++)for(unsigned n=0;n<=256;n++) {
-  unsigned w=tbv_rx_active_window_us(us,n);
+  unsigned w=tbv_rx_active_window_us(us,n,false);
+  assert(tbv_rx_active_window_us(us,n,true)==us);
   assert(w<=us && w<=1000);
   if(n<8)assert(w<=20);else assert(w==us);
  }

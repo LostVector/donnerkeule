@@ -9,9 +9,9 @@
  * Both windows remain relative to the same worker entry timestamp.
  */
 static inline unsigned int tbv_rx_active_window_us(unsigned int configured,
-						 unsigned int frames)
+						 unsigned int frames, bool full)
 {
-	return frames < 8 && configured > 20 ? 20 : configured;
+	return !full && frames < 8 && configured > 20 ? 20 : configured;
 }
 
 static inline bool tbv_rx_active_poll_again(unsigned int us, unsigned int frames,
