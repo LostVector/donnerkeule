@@ -72,7 +72,7 @@ files. The patch applies to a clean pinned index and matches the manifest.
 Ten same-world request comparisons matched the measured b288378fe4 baseline
 outputs and work across TP1/TP2:32K prompt/8 outputs,2K prompt/max128 outputs,
 and two concurrent short128-token requests, plus warmup. The brief2K prompt
-stopped at96 tokens; this is not a tg128 speed result. Context65536,UD-Q4_K_XL,
+stopped at96 tokens onTP1 and113 onTP2; this is not a tg128 speed result. Context65536,UD-Q4_K_XL,
 MTP/thinking OFF,greedy,cache reads OFF,1GiB RAM cache budget. Transport counters
 were unchanged. Four individual phase timing flags remain inconclusive; no
 performance improvement or full timing equivalence is claimed.

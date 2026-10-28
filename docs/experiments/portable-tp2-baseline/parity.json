@@ -786,5 +786,5 @@
   ],
   "extra_work_mismatches": [],
   "counter_flags": [],
-  "scope": "One matched start per binary/world;10 same-world request comparisons.2K prompt ends at96 tokens on original control although maximum128. This is source-package parity, not a throughput improvement or broad model quality claim."
+  "scope": "One matched start per binary/world;10 same-world request comparisons.2K prompt ends at96 tokens inTP1 and113 inTP2, with maximum128. This is source-package parity, not a throughput improvement or broad model quality claim."
 }
