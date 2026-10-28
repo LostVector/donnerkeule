@@ -23,6 +23,7 @@
 #define TBV_CONTROL_QUEUE_MULTIPLIER 4
 #define TBV_DATA_CREDIT_CONTROL_RESERVE 256
 #define TBV_DATA_TX_MAX_INFLIGHT 32
+#define TBV_NATIVE_DATA_TX_MAX_INFLIGHT 128
 #define TBV_TX_POLL_DELAY_MS 1
 #define TBV_RX_SUPP_POLL_DELAY_MS 1
 #define TBV_RX_SUPP_POLL_WINDOW_MS 16
@@ -180,10 +181,10 @@ module_param(apple_rx_raw_mode, bool, 0644);
 MODULE_PARM_DESC(apple_rx_raw_mode,
 		 "Compatibility no-op: Apple RAW RX is disabled because raw descriptor boundaries are not yet message-safe");
 
-static uint native_tx_max_inflight = TBV_DATA_TX_MAX_INFLIGHT;
+static uint native_tx_max_inflight = TBV_NATIVE_DATA_TX_MAX_INFLIGHT;
 module_param(native_tx_max_inflight, uint, 0644);
 MODULE_PARM_DESC(native_tx_max_inflight,
-		 "Maximum native data TX descriptors posted per path before waiting for completions; 0 disables native throttling");
+		 "Maximum native data TX descriptors posted per path before waiting for completions (default 128); 0 disables native throttling");
 
 struct tbv_data_frame {
 	struct ring_frame frame;
