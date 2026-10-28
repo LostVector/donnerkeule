@@ -1,11 +1,25 @@
 # Gufo TP2 on dual Strix Halo: tested settings and launch recipe
 
 Measured 2026-10-27 on GMKtec EVO-X2 + Corsair AI Workstation300,
-each Ryzen AI Max+395/128GB, one USB4 cable trained at 20Gbit/s per direction.
+each Ryzen AI Max+395/128GB. Initial measurements used20Gbit/s per direction;
+the latest qualification negotiated40Gbit/s (20Gbit/s/lane ×2).
 This records our best-tested **experimental starting profiles**, not a proven
 universal optimum. It includes a one-command-per-rank launcher **after the
 compatible driver, provider and Gufo are installed**. It is not a fresh-OS
 installer; exact benchmark reproduction has unpublished prerequisites below.
+
+## Latest40Gbit/s measurements
+
+See [the completed40G report](experiments/link40.md) for CPU costs, MTP/C4/DP2
+results and retained limitations. At32K, TP2 polling off/adaptive/full measured
+1708/1846/1866tok/s. Adaptive captures most of the prefill benefit; full100us is
+an explicit CPU/latency tradeoff, not a default recommendation. Both hosts have
+**32 logical CPUs**. Measured bulk remains~20Gbit/s one-way despite40Gbit/s link
+training. Raising the TX frame window32→128 gained only1.81%; leave32.
+
+The profiles below remain AR starting points. MTP requires the matching shared-Q8
+sidecar on both nodes (`--speculative mtp --mtp-model PATH`). It changes decode
+policy and needs separate workload/quality validation; it does not speed prefill.
 
 ## 1. Choose the tested profile
 
