@@ -84,3 +84,11 @@ A512KiB completion-audit exchange adds8,000 endpoint payload checks. Hot host RT
 Same private7E27 module, off/full/full/off100us sequence,40MiB,1QP,depth8,8second perftest runs in both directions. Off→full medians: Corsair→EVO19.545→19.505Gb/s; EVO→Corsair20.30→20.34Gb/s. RX frames/worker rise~2→14–15 but bandwidth remains flat; whole-run sender CPU increases~0.9–1.2 logical cores. Reject full polling as a bulk-bandwidth fix; the separate prefill benefit remains. Baseline81C6 restored.
 
 Baseline/window software-credit stall deltas are zero. One full phase records23 stalls across~5million frames; counter counts do not quantify stall time. Hardware hop-credit allocation is independent and unmeasured. Per-descriptor NHI MMIO and completion retirement are plausible next tracing targets, not proven bottlenecks. Expanded counter audit covers70 captured intervals without tracked error/retry increments.
+
+## TX-window follow-up supersedes the initial rejection
+
+The user's requested32/128/128/32 repeat runs actual inference regardless of the
+former5% gate.128 reproduces~1.5–2.1% bulk and~0.8–1.2% median model gains.
+Recommend it as an optional throughput profile, with mixed idle-tail/model flags
+retained. See [the complete follow-up](tx-window-repeat.md). Runtime baseline32
+is restored. This corrects the initial decision to dismiss a small possible gain.

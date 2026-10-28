@@ -15,7 +15,10 @@ results and retained limitations. At32K, TP2 polling off/adaptive/full measured
 1708/1846/1866tok/s. Adaptive captures most of the prefill benefit; full100us is
 an explicit CPU/latency tradeoff, not a default recommendation. Both hosts have
 **32 logical CPUs**. Measured bulk remains~20Gbit/s one-way despite40Gbit/s link
-training. Raising the TX frame window32→128 gained only1.81%; leave32.
+training. A repeated32/128/128/32 follow-up now confirms~1.5–2.1% bulk and~1% median
+inference gain from128. It is an optional throughput setting with mixed latency
+tails; see [TX-window follow-up](experiments/tx-window-repeat.md). Runtime baseline
+was restored32; the former5% experiment gate is superseded.
 
 The profiles below remain AR starting points. MTP requires the matching shared-Q8
 sidecar on both nodes (`--speculative mtp --mtp-model PATH`). It changes decode
