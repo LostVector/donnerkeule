@@ -39,8 +39,12 @@ Prefill context is 65,536; AR context is 4,096. Settings match across world size
 within each profile. The generic CLI `--prefill-chunk 2048` does **not** mean
 2,048-row GPU batches in this Flash backend: it owns 4,096-token banks, with
 up to 8,192 paired tokens per TP2 step. Changing that CLI knob alone did not
-change the observed cold-prefill geometry. An actual 4K/8K backend experiment is
-separate and ongoing; no larger-bank default is recommended yet.
+change the observed cold-prefill geometry. A matched actual4K/8K per-bank
+experiment is now complete: TP1 gained1.30%, TP2 gained0.59%, with matching
+outputs on the tested fixture. Keep the4K backend default. The8K TP2 experiment
+also required an experimental application-level split of writes over the native
+64MiB per-message cap; increasing the registered window alone is insufficient.
+[Methods and limitations](experiments/backend-batch-capacity.md).
 
 Within-world output/work repeats match, and tracked driver error/retry deltas
 are zero. AR continuations differ across world sizes: this is practical engine
