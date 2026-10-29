@@ -396,3 +396,13 @@ printed, and invalid inputs. This validates argument construction, not a fresh
 public-stack hardware installation. The measured private launcher used the
 same argument values; the newly portable wrapper has not been used to claim
 new benchmark results.
+
+### Experimental descriptor-session reloads
+
+The native host-WRITE settings above remain separate from descriptor/GPU DMA-BUF
+experiments. In descriptor mode, unload both hosts before loading either, then
+verify reciprocal current host IDs before opening QPs. Sequential per-host
+unload-and-load can bind the old peer session even while rails report ready.
+See [descriptor session lifecycle and read-only checker](experiments/descriptor-session-lifecycle.md)
+for the observed failure, corrected procedure and bounded validation. This does
+not recommend descriptor mode over the measured native decode configuration.
