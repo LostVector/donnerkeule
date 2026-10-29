@@ -536,3 +536,12 @@ Hydra evaluates the same path through
 `hydraJobs.x86_64-linux.thunderbolt-ibverbs-linux-thunderbolt`.
 VM smoke tests boot both stock and patched Linux 7.2, load the corresponding
 module, and verify legacy versus source-aware native control respectively.
+
+### Experimental native TX frame window
+
+This branch proposes `native_tx_max_inflight=128` by default for native Linux
+paths. Apple/non-native fallback remains32. The parameter is writable while idle;
+set32 to restore the prior native limit. [Matched32/128/128/32 results and limits](docs/experiments/tx-window-repeat.md)
+show~1.5–2.1% bulk and~1% median Gufo gains, with mixed latency tails. This is a
+draft default-policy proposal, not a hardware-qualified release of this exact
+clean module; measurements used additional private ordering/retirement fixes.

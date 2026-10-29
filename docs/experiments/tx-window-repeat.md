@@ -95,4 +95,18 @@ Raw artifacts and reproducible controllers are retained on the test hosts under
 `~/strix-dispatch-investigation/link40/`. Published [bulk CSV](tx-window-repeat-bulk.csv)
 and [serving CSV](tx-window-repeat-serving.csv) retain each phase separately.
 The frozen private engine/module prerequisites remain those in TP2_TUNING.md;
-this does not qualify the exact clean public polling module or another model.
+these measurements do not qualify this exact combined module, polling
+combinations or another model.
+
+## Native default in the experimental fork
+
+Set only the native Linux parameter's initial value to128. The shared fallback
+limit stays32, so Apple/non-native paths retain their prior limit. Users can
+select native_tx_max_inflight=32 at load time or while idle to reproduce the
+control. Runtime ring-size clamping and0(disable throttle) semantics remain.
+
+Hardware evidence uses pinned private81C6 with ordering/retirement fixes. The
+combined fork includes the RC ordering and retirement fixes, but the exact
+combined polling/default128 module still needs hardware qualification. Merging
+into the experimental fork does not resolve the documented timing flags or
+change the loaded32-window baseline on the test hosts.
