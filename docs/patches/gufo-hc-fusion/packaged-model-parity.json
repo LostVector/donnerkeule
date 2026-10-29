@@ -1,0 +1,31 @@
+{
+  "paired_requests": 5,
+  "output_work_mismatches": [],
+  "extra_work_checks": 25,
+  "extra_work_mismatches": [],
+  "counter_windows": [
+    {
+      "mode": "two-measured",
+      "rank": 0,
+      "nonzero": {}
+    },
+    {
+      "mode": "two-measured",
+      "rank": 1,
+      "nonzero": {}
+    },
+    {
+      "mode": "two-packaged",
+      "rank": 0,
+      "nonzero": {}
+    },
+    {
+      "mode": "two-packaged",
+      "rank": 1,
+      "nonzero": {}
+    }
+  ],
+  "scope": "Bounded TP2 warmup/32K prefill/2K generation/C2 parity between original measured fusion ELF and packaged rebuild. Not timing equivalence, cached/cold parity or production-wide qualification.",
+  "timing_qualification_status": "passed",
+  "flagged_or_inconclusive_phases": []
+}

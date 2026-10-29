@@ -1,0 +1,26 @@
+{
+  "paired_reductions_ms": [
+    118.0066763333325,
+    170.68577366666614,
+    281.9434616666658,
+    349.0447526666667,
+    355.2247386666677,
+    340.2774583333321,
+    320.30152066666597,
+    282.82334466666725
+  ],
+  "control_mean_ms": 16305.025840208333,
+  "fused_mean_ms": 16027.737374375,
+  "mean_reduction_ms": 277.288465833333,
+  "latency_reduction_percent": 1.7006318698958287,
+  "equivalent_prefill_rate_gain_percent": 1.730053714734936,
+  "exact_two_sided_p": 0.0078125,
+  "assignments": 256,
+  "bootstrap95_ms": [
+    216.1494709166659,
+    329.20166529166636
+  ],
+  "bootstrap_samples": 100000,
+  "seed": 2026102804,
+  "significant_positive": true
+}

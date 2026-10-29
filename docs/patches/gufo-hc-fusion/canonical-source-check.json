@@ -1,0 +1,10 @@
+{
+  "formatter": "clang-format21.1.8",
+  "matches": {
+    "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": true,
+    "src/models/qwen38_flash_next/kernels/rocm/executor.hpp": true,
+    "src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp": true,
+    "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp": true
+  },
+  "scope": "Canonicalized source bytes match the reconstructed original measured candidate across all four changed files. This does not claim new ELF identity or timing equivalence."
+}

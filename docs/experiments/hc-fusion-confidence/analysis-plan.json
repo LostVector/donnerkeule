@@ -1,0 +1,12 @@
+{
+  "status": "predeclared before new outcomes",
+  "pairs": 8,
+  "seed": 2026102803,
+  "primary": "Per-start arithmetic mean prefill_ms across all three exact32768-token requests; paired control minus fused mean, positive faster. Warmup retained separately.",
+  "analysis": "Exact two-sided independent within-pair sign-flip test over256 assignments; paired mean reduction and percentile bootstrap95% interval from100000 paired resamples seed2026102804.",
+  "alpha": 0.05,
+  "stopping": "Complete all8 pairs. No significance-driven stopping, speed-based sample removal or replacement of slow starts. Incomplete/hardware/correctness failures retained, no qualification pass.",
+  "scope": "Confidence for uncached32K prefill only, context65536, default4K banks, MTPoff, sameUD-Q4_K_XL. Does not clear existing inconclusive cold/decode/C2 gates or cached/cold arithmetic mismatch. No default promotion on primary p-value alone.",
+  "adoption": "Small effects eligible if supported; evaluate confidence separately from magnitude. Correctness, work/counters and existing request-phase5% AND3ms gates remain unchanged.",
+  "rationale": "The previous four-start ABBA observed+2.32% with control start drift~1.8%. Eight independent randomized start pairs provide256 assignments and a bounded repeatability test; no guaranteed-power claim."
+}

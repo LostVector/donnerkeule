@@ -1,0 +1,50 @@
+[
+  {
+    "a": "one1",
+    "b": "one2",
+    "profile": "pp",
+    "requests": 9,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  },
+  {
+    "a": "one1",
+    "b": "one2",
+    "profile": "ar",
+    "requests": 15,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  },
+  {
+    "a": "two1",
+    "b": "two2",
+    "profile": "pp",
+    "requests": 9,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  },
+  {
+    "a": "two1",
+    "b": "two2",
+    "profile": "ar",
+    "requests": 15,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  },
+  {
+    "a": "one1",
+    "b": "two1",
+    "profile": "pp",
+    "requests": 9,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  },
+  {
+    "a": "one1",
+    "b": "two1",
+    "profile": "ar",
+    "requests": 15,
+    "work_mismatches": 0,
+    "output_mismatches": 15
+  }
+]

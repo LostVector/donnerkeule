@@ -1,0 +1,120 @@
+{
+  "median_of_start_medians": {
+    "4096": 2022.327207272519,
+    "8192": 2034.281467802565
+  },
+  "ratio": 1.0059111406339474,
+  "summary": [
+    {
+      "phase": "two-b1",
+      "world": 2,
+      "backend_chunk": 4096,
+      "window_bytes": 100663296,
+      "requests": 3,
+      "prefill_tps": 2026.29073656469,
+      "prefill_ms": 16171.420719000002,
+      "client_ttft_ms": 16183.56864100042,
+      "reported_max_steps": [
+        8192,
+        8192,
+        8192
+      ],
+      "reported_step_counts": [
+        6,
+        6,
+        6
+      ]
+    },
+    {
+      "phase": "two-c1",
+      "world": 2,
+      "backend_chunk": 8192,
+      "window_bytes": 100663296,
+      "requests": 3,
+      "prefill_tps": 2029.3965780119565,
+      "prefill_ms": 16146.671555,
+      "client_ttft_ms": 16176.114400000188,
+      "reported_max_steps": [
+        8192,
+        16384,
+        10233
+      ],
+      "reported_step_counts": [
+        6,
+        5,
+        5
+      ]
+    },
+    {
+      "phase": "two-c2",
+      "world": 2,
+      "backend_chunk": 8192,
+      "window_bytes": 100663296,
+      "requests": 3,
+      "prefill_tps": 2039.1663575931734,
+      "prefill_ms": 16069.311794,
+      "client_ttft_ms": 16088.914145999297,
+      "reported_max_steps": [
+        8192,
+        16384,
+        10233
+      ],
+      "reported_step_counts": [
+        6,
+        5,
+        5
+      ]
+    },
+    {
+      "phase": "two-b2",
+      "world": 2,
+      "backend_chunk": 4096,
+      "window_bytes": 100663296,
+      "requests": 3,
+      "prefill_tps": 2018.3636779803483,
+      "prefill_ms": 16234.933454999999,
+      "client_ttft_ms": 16247.621380000055,
+      "reported_max_steps": [
+        8192,
+        8192,
+        8192
+      ],
+      "reported_step_counts": [
+        6,
+        6,
+        6
+      ]
+    }
+  ],
+  "quality": [
+    {
+      "a": "b1",
+      "b": "b2",
+      "requests": 3,
+      "work_mismatches": 0,
+      "output_mismatches": 0
+    },
+    {
+      "a": "c1",
+      "b": "c2",
+      "requests": 3,
+      "work_mismatches": 0,
+      "output_mismatches": 0
+    },
+    {
+      "a": "b1",
+      "b": "c1",
+      "requests": 3,
+      "work_mismatches": 0,
+      "output_mismatches": 0
+    },
+    {
+      "a": "b2",
+      "b": "c2",
+      "requests": 3,
+      "work_mismatches": 0,
+      "output_mismatches": 0
+    }
+  ],
+  "counter_flags": []
+}
