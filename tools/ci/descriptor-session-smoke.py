@@ -17,6 +17,7 @@ with tempfile.TemporaryDirectory(prefix="tbv-session-check-") as directory:
     paths = [Path(directory) / name for name in ["a", "b"]]
     cases = [
         (snapshot(A, B), snapshot(B, A), True),
+        (snapshot(A, A), snapshot(A, A), False),
         (snapshot(A, OLD), snapshot(B, A), False),
         (snapshot(A, B) + f"peer 3 remote_host={OLD}\n", snapshot(B, A), False),
         (snapshot(A, B).replace("dmabuf_verbs: 1", "dmabuf_verbs: 0"), snapshot(B, A), False),
@@ -30,4 +31,4 @@ with tempfile.TemporaryDirectory(prefix="tbv-session-check-") as directory:
         result = subprocess.run([sys.executable, str(TOOL), *map(str, paths)], text=True, capture_output=True)
         assert result.returncode == (0 if valid else 1), result
         assert json.loads(result.stdout)["reciprocal_ids_match"] == valid
-print("PASS: 7 descriptor session CLI cases")
+print("PASS: 8 descriptor session CLI cases")

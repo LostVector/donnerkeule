@@ -58,7 +58,7 @@ The corrected both-module-absent barrier and fresh reciprocal-ID gate passed
 three direct/worker-only/direct starts and15 matching Gufo requests. Driver
 counter windows and checked kernel logs were clean; both hosts restored their
 approved native baseline. The helper accepts four matching captured pairs and
-rejects both stale captured pairs; seven CLI smoke cases cover malformed and
+rejects both stale captured pairs; eight CLI smoke cases cover malformed and
 mixed identities. Run them with:
 
 ```sh

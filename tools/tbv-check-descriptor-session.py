@@ -30,6 +30,8 @@ def main():
     args = parser.parse_args()
     try:
         hosts = [parse(p.read_text()) for p in [args.local_snapshot, args.peer_snapshot]]
+        if hosts[0]["local_host_id"] == hosts[1]["local_host_id"]:
+            raise ValueError("expected distinct local IDs for two hosts")
         mismatches = [i for i, h in enumerate(hosts)
                       if h["remote_host_ids"] != [hosts[1 - i]["local_host_id"]]]
         valid = not mismatches
