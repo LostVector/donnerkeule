@@ -1,0 +1,19 @@
+{
+  "source_branch": "fix/native-rc-ordering",
+  "module_sha256": "70cb751314c1e32f9be4f48de23437f7b626d0847a64014e87c1aab7f76aae01",
+  "srcversion": "52C08D90CDFE35DF0026149",
+  "tests_passed": true,
+  "hardware_loaded": false,
+  "semantic_origin": "frozen overlap-ordering/native-ordering-and-retirement.patch; private81C6 ibdev differs only in3 trace spans",
+  "byte_identical_to_previous_hardware_artifact": true,
+  "previous_hardware_audit": {
+    "initial_cases_passed": 7,
+    "extended_cases_passed": 24,
+    "expected_peer_exit_cases": 4,
+    "fresh_reconnection_cases": 4,
+    "new_model_requests": 91,
+    "model_hash_and_work_matches": 91,
+    "srcversion": "52C08D90CDFE35DF0026149",
+    "scope": "bounded native host RC SEND/WRITE qualification on this two-node setup; not all verbs/platform modes"
+  }
+}

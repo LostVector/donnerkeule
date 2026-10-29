@@ -427,6 +427,7 @@ struct tbv_qp {
 	struct list_head pending_read_resps;
 	struct list_head apple_sq;
 	struct work_struct apple_sq_work;
+	struct delayed_work native_sq_work;
 	struct work_struct error_work;
 	struct delayed_work timeout_work;
 	struct ib_qp_init_attr init_attr;
@@ -537,6 +538,7 @@ struct tbv_send_ctx {
 	bool completed;
 	bool ready;
 	bool pending;
+	bool native_deferred;
 	bool retryable;
 	bool retrying;
 	bool rnr_waiting;
@@ -628,6 +630,7 @@ static bool tbv_send_complete(struct tbv_send_ctx *send, int status);
 static void tbv_send_tx_done(void *ctx, int status);
 static void tbv_apple_send_tx_done(void *ctx, int status);
 static void tbv_apple_sq_work(struct work_struct *work);
+static void tbv_native_sq_work(struct work_struct *work);
 static void tbv_qp_flush_apple_sq(struct tbv_qp *tqp);
 static void tbv_read_ctx_put(struct tbv_read_ctx *read);
 static bool tbv_read_complete(struct tbv_read_ctx *read, int status);
@@ -1288,19 +1291,51 @@ static void tbv_qp_release_sendq_counted(struct tbv_qp *tqp, bool *counted)
 	spin_unlock_irqrestore(&tqp->lock, flags);
 }
 
-static void tbv_qp_queue_send(struct tbv_qp *tqp, struct tbv_send_ctx *send)
+/* A block-striped receiver places future fragments before it can retire
+ * their PSNs. Keep one native host RC send on the wire per QP so a retry
+ * cannot overwrite a later write. This also covers remote MR aliases whose
+ * physical overlap the sender cannot determine. Rails within a send and
+ * independent QPs remain parallel; DMA-BUF and Apple paths are unchanged. */
+static bool tbv_native_sq_ordered(const struct tbv_qp *tqp)
+{
+	return tqp->backend == TBV_BACKEND_NATIVE && tqp->type == IB_QPT_RC &&
+	       !tbv_dmabuf_verbs_enabled();
+}
+
+/* tqp->lock serializes enqueue against closing/cancel and ACK advancement. */
+static void tbv_native_sq_kick_locked(struct tbv_qp *tqp, unsigned long delay)
+{
+	struct tbv_send_ctx *head;
+
+	if (!tbv_native_sq_ordered(tqp) || tqp->closing ||
+	    (tqp->state == IB_QPS_ERR || tqp->state == IB_QPS_RESET) ||
+	    list_empty(&tqp->pending_sends))
+		return;
+	head = list_first_entry(&tqp->pending_sends, struct tbv_send_ctx, node);
+	if (head->native_deferred)
+		queue_delayed_work(tqp->owner->workqueue ?
+				   tqp->owner->workqueue : system_unbound_wq,
+				   &tqp->native_sq_work, delay);
+}
+
+static bool tbv_qp_queue_send(struct tbv_qp *tqp, struct tbv_send_ctx *send)
 {
 	unsigned long flags;
+	bool deferred;
 
 	spin_lock_irqsave(&tqp->lock, flags);
 	send->queued_jiffies = 0;
 	send->first_queued_jiffies = 0;
 	send->pending = true;
+	send->native_deferred = tbv_native_sq_ordered(tqp) &&
+		!list_empty(&tqp->pending_sends);
 	send->retrying = false;
 	send->rnr_waiting = false;
 	send->retry_reason = TBV_SEND_POST_INITIAL;
+	deferred = send->native_deferred;
 	list_add_tail(&send->node, &tqp->pending_sends);
 	spin_unlock_irqrestore(&tqp->lock, flags);
+	return deferred;
 }
 
 static void tbv_qp_queue_read(struct tbv_qp *tqp, struct tbv_read_ctx *read)
@@ -1404,6 +1439,7 @@ static void tbv_qp_drain_ready_sends_locked(struct tbv_qp *tqp,
 					    struct list_head *complete)
 {
 	struct tbv_send_ctx *send;
+	bool failed = false;
 
 	while (!list_empty(&tqp->pending_sends)) {
 		send = list_first_entry(&tqp->pending_sends,
@@ -1411,11 +1447,14 @@ static void tbv_qp_drain_ready_sends_locked(struct tbv_qp *tqp,
 		if (!send->ready)
 			break;
 		list_move_tail(&send->node, complete);
+		failed |= send->completion_status != 0;
 		send->pending = false;
 		send->retrying = false;
 		send->rnr_waiting = false;
 		tbv_qp_release_sendq_counted_locked(tqp, &send->sq_counted);
 	}
+	if (!failed)
+		tbv_native_sq_kick_locked(tqp, 0);
 }
 
 static bool tbv_qp_complete_send_ordered(struct tbv_qp *tqp, u32 psn,
@@ -2643,6 +2682,7 @@ static int tbv_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *init_attr,
 	INIT_LIST_HEAD(&tqp->rx_reorder);
 	hash_init(tqp->rx_reorder_hash);
 	INIT_WORK(&tqp->apple_sq_work, tbv_apple_sq_work);
+	INIT_DELAYED_WORK(&tqp->native_sq_work, tbv_native_sq_work);
 	INIT_WORK(&tqp->error_work, tbv_qp_error_work);
 	INIT_DELAYED_WORK(&tqp->timeout_work, tbv_qp_timeout_work);
 	tqp->apple_pending_active = -1;
@@ -2742,6 +2782,7 @@ static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
 	wake_up_all(&tqp->credit_wait);
 	wake_up_all(&tqp->apple_tx_wait);
 	cancel_work_sync(&tqp->apple_sq_work);
+	cancel_delayed_work_sync(&tqp->native_sq_work);
 	cancel_delayed_work_sync(&tqp->timeout_work);
 	spin_lock_irqsave(&tqp->lock, flags);
 	tqp->timeout_work_armed = false;
@@ -3445,26 +3486,36 @@ static void tbv_read_tx_done(void *ctx, int status)
 	tbv_read_ctx_put(read);
 }
 
+/* Account for DMA completions and abandoned build frames identically. The
+ * last retirement must start the ACK/retry timer even when no DMA callback
+ * remains to observe tx_pending reaching zero. Caller holds a send reference. */
+static void tbv_send_retire_frames(struct tbv_send_ctx *send, u32 frames,
+                                  int status)
+{
+	struct tbv_qp *tqp = send->tqp;
+	unsigned long flags;
+	bool tx_drained;
+
+	if (!send->retryable)
+		return;
+	spin_lock_irqsave(&tqp->lock, flags);
+	tx_drained = atomic_sub_and_test(frames, &send->tx_pending);
+	if (tx_drained) {
+		send->retrying = false;
+		if (!status && send->pending && !send->rnr_waiting) {
+			tbv_send_mark_queued(send, jiffies);
+			tbv_qp_schedule_timeout_locked(tqp);
+		}
+	}
+	spin_unlock_irqrestore(&tqp->lock, flags);
+}
+
 static void tbv_send_tx_done(void *ctx, int status)
 {
 	struct tbv_send_ctx *send = ctx;
 	struct tbv_qp *tqp = send->tqp;
 
-	if (send->retryable) {
-		unsigned long flags;
-		bool tx_drained;
-
-		spin_lock_irqsave(&tqp->lock, flags);
-		tx_drained = atomic_dec_and_test(&send->tx_pending);
-		if (tx_drained) {
-			send->retrying = false;
-			if (!status && send->pending && !send->rnr_waiting) {
-				tbv_send_mark_queued(send, jiffies);
-				tbv_qp_schedule_timeout_locked(tqp);
-			}
-		}
-		spin_unlock_irqrestore(&tqp->lock, flags);
-	}
+	tbv_send_retire_frames(send, 1, status);
 
 	if (!status) {
 		tbv_send_ctx_put(send);
@@ -3487,6 +3538,8 @@ static void tbv_send_tx_done(void *ctx, int status)
 			}
 		}
 	}
+	if (tbv_native_sq_ordered(tqp))
+		tbv_qp_mark_error(tqp);
 	tbv_send_ctx_put(send);
 }
 
@@ -4739,7 +4792,7 @@ static void tbv_native_send_run_build_job(struct tbv_send_build_job *job)
 	 * send is then retransmitted after its timeout, or flushed.
 	 */
 	if (unsent)
-		atomic_sub(unsent, &ctx->tx_pending);
+		tbv_send_retire_frames(ctx, unsent, 0);
 }
 
 void tbv_ibdev_path_build_work(struct work_struct *work)
@@ -4808,7 +4861,7 @@ static void tbv_native_send_queue_blocks(struct tbv_send_ctx *ctx,
 								 end - first);
 
 			if (unsent)
-				atomic_sub(unsent, &ctx->tx_pending);
+				tbv_send_retire_frames(ctx, unsent, 0);
 			tbv_release_path_refs(&paths[p], 1);
 			continue;
 		}
@@ -5490,6 +5543,54 @@ err_put_qp:
 	return ret;
 }
 
+static void tbv_native_sq_work(struct work_struct *work)
+{
+	struct tbv_qp *tqp = container_of(to_delayed_work(work),
+					     struct tbv_qp, native_sq_work);
+	struct tbv_send_ctx *send = NULL;
+	unsigned long flags;
+	bool fatal = false;
+	int ret;
+
+	spin_lock_irqsave(&tqp->lock, flags);
+	if (!tqp->closing && tqp->state != IB_QPS_ERR &&
+	    tqp->state != IB_QPS_RESET &&
+	    !list_empty(&tqp->pending_sends)) {
+		struct tbv_send_ctx *head = list_first_entry(
+			&tqp->pending_sends, struct tbv_send_ctx, node);
+
+		if (head->native_deferred && !head->ready) {
+			head->native_deferred = false;
+			tbv_send_ctx_get(head);
+			send = head;
+		}
+	}
+	spin_unlock_irqrestore(&tqp->lock, flags);
+	if (!send)
+		return;
+
+	ret = tbv_native_send_ctx_post_frames(send, TBV_SEND_POST_INITIAL);
+	if (ret) {
+		spin_lock_irqsave(&tqp->lock, flags);
+		if (send->pending && !send->ready && !tqp->closing &&
+		    tqp->state != IB_QPS_ERR) {
+			if (ret == -ENOMEM && !atomic_read(&send->tx_pending) &&
+			    !send->queued_jiffies && !send->rnr_waiting) {
+				/* Nothing was posted: preserve ownership and retry
+				 * transient admission pressure without a hot loop. */
+				send->native_deferred = true;
+				tbv_native_sq_kick_locked(tqp, 1);
+			} else {
+				fatal = true;
+			}
+		}
+		spin_unlock_irqrestore(&tqp->lock, flags);
+	}
+	if (fatal)
+		tbv_qp_mark_error(tqp);
+	tbv_send_ctx_put(send);
+}
+
 static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 {
 	struct tbv_send_segment segs[TBV_IBDEV_MAX_SGE] = {};
@@ -5644,8 +5745,14 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 	spin_unlock_irqrestore(&tqp->lock, flags);
 	ctx->psn = psn;
 
-	tbv_qp_queue_send(tqp, ctx);
+	/* Keep a caller reference before publishing a deferred context: an ACK
+	 * can start and complete it before post_send returns. */
 	tbv_send_ctx_get(ctx);
+	if (tbv_qp_queue_send(tqp, ctx)) {
+		atomic64_inc(&tqp->owner->data_tx_accepted);
+		tbv_send_ctx_put(ctx);
+		return 0;
+	}
 	ret = tbv_native_send_ctx_post_frames(ctx, TBV_SEND_POST_INITIAL);
 	if (ret) {
 		if (tbv_qp_unqueue_send(tqp, ctx)) {
@@ -5683,7 +5790,7 @@ static int tbv_post_send_impl(struct ib_qp *qp, const struct ib_send_wr *wr,
 	struct tbv_qp *tqp = container_of(qp, struct tbv_qp, base);
 	const struct ib_send_wr *cur;
 	int ret;
-	if (tbv_dmabuf_verbs_enabled())
+	if (tbv_dmabuf_verbs_enabled() || tbv_native_sq_ordered(tqp))
 		mutex_lock(&tqp->post_lock);
 
 	for (cur = wr; cur; cur = cur->next) {
@@ -5691,13 +5798,13 @@ static int tbv_post_send_impl(struct ib_qp *qp, const struct ib_send_wr *wr,
 		if (ret) {
 			if (bad_wr)
 				*bad_wr = cur;
-			if (tbv_dmabuf_verbs_enabled())
+			if (tbv_dmabuf_verbs_enabled() || tbv_native_sq_ordered(tqp))
 				mutex_unlock(&tqp->post_lock);
 			return ret;
 		}
 	}
 
-	if (tbv_dmabuf_verbs_enabled())
+	if (tbv_dmabuf_verbs_enabled() || tbv_native_sq_ordered(tqp))
 		mutex_unlock(&tqp->post_lock);
 	return 0;
 }
