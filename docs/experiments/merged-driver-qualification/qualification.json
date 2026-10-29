@@ -1,0 +1,101 @@
+{
+  "paired_transport_cases": 24,
+  "rtt_samples": 96000,
+  "ordering_cases": 32,
+  "expected_peer_exit_cases": 16,
+  "fresh_recovery_cases": 16,
+  "model_requests_matching_reference": 20,
+  "merged_configs_checked": [
+    "candidate32",
+    "candidate-default",
+    "candidate-adaptive",
+    "candidate-full"
+  ],
+  "exact_fork_commit": "e1e14cb4aa7529ceb00ef3cf8f3ae4486bc36f1e",
+  "clean_counter_flags": [],
+  "induced_fault_counter_changes": [
+    {
+      "label": "candidate32-fault-0-8-r0",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate32-fault-0-128-r0",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate32-fault-1-128-r1",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate-default-fault-0-128-r0",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate-default-fault-1-8-r1",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate-default-fault-1-128-r1",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate-adaptive-fault-1-8-r1",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate-adaptive-fault-1-128-r1",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate-full-fault-0-128-r0",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    },
+    {
+      "label": "candidate-full-fault-1-128-r1",
+      "kind": "induced-peer-exit",
+      "nonzero": {
+        "data_tx_ack_error": 1,
+        "data_rx_reorder_timeout": 1
+      }
+    }
+  ],
+  "kernel_crash_flags": [],
+  "baseline_restored_both": true,
+  "scope": "Exact merged module6C607,4configs: explicitTX32,defaultTX128,adaptive/full100us; finite host-window RC WRITE correctness/latency, ordering/aliasing, peer-exit/reconnection and model parity on two40G cables/four rails/fixed7.3 core. Not all verbs, DMA-BUF or overnight stability."
+}

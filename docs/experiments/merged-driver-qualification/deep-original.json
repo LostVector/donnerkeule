@@ -1,0 +1,96 @@
+{
+  "cases": [
+    {
+      "case": "depth128-5MiB-0-overlap",
+      "receiver": 0,
+      "pattern": "overlap",
+      "depth": 128,
+      "bytes": 5242880,
+      "rounds": 2,
+      "exits": [
+        0,
+        0
+      ]
+    },
+    {
+      "case": "depth128-5MiB-0-alias",
+      "receiver": 0,
+      "pattern": "alias",
+      "depth": 128,
+      "bytes": 5242880,
+      "rounds": 2,
+      "exits": [
+        0,
+        0
+      ]
+    },
+    {
+      "case": "depth128-5MiB-1-overlap",
+      "receiver": 1,
+      "pattern": "overlap",
+      "depth": 128,
+      "bytes": 5242880,
+      "rounds": 2,
+      "exits": [
+        0,
+        0
+      ]
+    },
+    {
+      "case": "depth128-5MiB-1-alias",
+      "receiver": 1,
+      "pattern": "alias",
+      "depth": 128,
+      "bytes": 5242880,
+      "rounds": 2,
+      "exits": [
+        0,
+        0
+      ]
+    }
+  ],
+  "counter_windows": [
+    {
+      "case": "depth128-5MiB-0-overlap",
+      "host_rank": 0,
+      "fault_deltas": {}
+    },
+    {
+      "case": "depth128-5MiB-0-overlap",
+      "host_rank": 1,
+      "fault_deltas": {}
+    },
+    {
+      "case": "depth128-5MiB-0-alias",
+      "host_rank": 0,
+      "fault_deltas": {}
+    },
+    {
+      "case": "depth128-5MiB-0-alias",
+      "host_rank": 1,
+      "fault_deltas": {}
+    },
+    {
+      "case": "depth128-5MiB-1-overlap",
+      "host_rank": 0,
+      "fault_deltas": {}
+    },
+    {
+      "case": "depth128-5MiB-1-overlap",
+      "host_rank": 1,
+      "fault_deltas": {}
+    },
+    {
+      "case": "depth128-5MiB-1-alias",
+      "host_rank": 0,
+      "fault_deltas": {}
+    },
+    {
+      "case": "depth128-5MiB-1-alias",
+      "host_rank": 1,
+      "fault_deltas": {}
+    }
+  ],
+  "baseline_restored_both": true,
+  "scope": "Exact original depth128/5MiB overlap+alias patterns,2rounds,receiver on each host, merged moduleTX128/full100us. Bounded test, not overnight or all verbs."
+}

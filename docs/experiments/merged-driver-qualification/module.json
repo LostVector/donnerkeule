@@ -1,0 +1,12 @@
+{
+  "main": "e1e14cb4aa7529ceb00ef3cf8f3ae4486bc36f1e",
+  "built_module_srcversion": "6C607C44DDF7AC1A9A38F61",
+  "built_module_sha256": "f77243f4fe7c7cf18b4516e3f1b52a64c447461c751686edef5e69d312de6796",
+  "local_validation": {
+    "kernel_build": "Linux7.3 passed",
+    "framework_tests": 11,
+    "ordering_and_retirement_ASAN_UBSAN": "passed",
+    "kernel_and_tools_whitespace": "passed",
+    "merged_source_tree_equals_validated_tree": true
+  }
+}
