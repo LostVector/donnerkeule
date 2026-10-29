@@ -6,7 +6,8 @@ each cable now qualifies at40Gbit/s (20Gbit/s/lane ×2), with two cables tested.
 This records our best-tested **experimental starting profiles**, not a proven
 universal optimum. It includes a one-command-per-rank launcher **after the
 compatible driver, provider and Gufo are installed**. It is not a fresh-OS
-installer; exact benchmark reproduction has unpublished prerequisites below.
+installer; pinned source bundles, dependencies and bounded qualification are
+linked below.
 
 ## Linux7.3 teardown fix qualified on this pair
 
@@ -54,9 +55,20 @@ scaling, not token-forced identical execution or an accuracy certification.
 **Correctness prerequisite:** [native host RC ordering and TX retirement PR #3](https://github.com/LostVector/donnerkeule/pull/3)
 contains the missing non-tracing correctness changes used in the measured
 private stack. Review it before the separate polling or TX-window tuning PRs.
-Its rebuilt unsigned module is byte-identical to our earlier bounded
-hardware-qualified artifact; today's current serving baseline remains private
-81C6. A bare tuning PR is not the complete measured stack.
+The rebuilt module passed fresh two-cable payload/ordering/model and induced
+disconnect/recovery checks. Our installed81C6 build retains additional diagnostic
+tracing; it is the same experimental driver, not a separate official release.
+See [fresh source/build qualification](experiments/portable-tp2-baseline.md).
+A bare tuning PR is not the complete measured stack.
+
+## Measured HC fusion: supported prefill benefit, remaining gates
+
+An independent eight-pair randomized test found **+1.73% uncached32K prefill
+throughput** (exact two-sided p=0.0078125), with matching paired outputs/work
+and no tracked counter increments. The existing request-phase audit remains
+inconclusive for six cold/short-decode phases; this is not a default change or
+a demonstrated ordinary-decode gain. Small effect size is not a rejection rule.
+[Full measurements, source and limits](experiments/hc-fusion-confidence.md).
 
 ## Latest: two cables and reboot persistence
 

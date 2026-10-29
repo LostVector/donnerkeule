@@ -1,0 +1,24 @@
+{
+  "base_gufo_commit": "0b6978aa1709f2ef863f5407e4ca7261191e9046",
+  "requires_baseline_patch_sha256": "64113a5f37daf8c6fe213bb75a772ad9fe918c54d9cae0c0686b01a2b78c60f8",
+  "hc_fusion_patch_sha256": "7bd9afed3479f7a5c301fd4b18435d2d9ec7f1bc388bf2ca5f8c768bc11b39b7",
+  "measured_control_sha256": "b288378fe41039f940aed5747c21c0964d9937e0f586e2cef063a2fd087f7599",
+  "measured_fused_sha256": "f225fe685afaca27f34c9c78783d1a690438b25e68ab8a8f29ebe935bb52e1d4",
+  "source_hashes": {
+    "src/models/qwen38_flash_next/CMakeLists.txt": "6cbc306c167efacb4a628aa4079b37136ca41d802b7a5a3e87c81683f6159749",
+    "src/models/qwen38_flash_next/engine.cpp": "3054428e91ced6bf37f2fdaac3aaca5c7ce415d6fd6a47fb4ef5c0a1e1b992fa",
+    "src/models/qwen38_flash_next/kernels/rocm/batch.cpp": "e550580fccfb897eaa2b61284a395c7044f845b4c28d12803ee1dc8259becd89",
+    "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "fd6d705c2d2031d4f36d575fde71a26a0fccbdc61054ae54c7790ef5c4583011",
+    "src/models/qwen38_flash_next/kernels/rocm/executor.hpp": "0ecf1ed9914dfcbca9fe87e977ae375c6c2c9bdcb0c23d705d426e626448606a",
+    "src/models/qwen38_flash_next/kernels/rocm/tp_trace.hpp": "a87baf4bf16f98a3a08f8c163d5581b30a71934b2c308203844731261ef1ce43",
+    "src/models/qwen38_flash_next/kernels/rocm/verbs.cpp": "3f57313b9030c771fe2d7175773f382afb764db816b826b13f43281effbbdaa3",
+    "tests/models/qwen38_flash_next/head_gather_ops_probe.cpp": "7b43c94fc8e16b3517db51baa73dd3aff6f1b96e2f09b62eca36de09c04d0b35",
+    "src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp": "b33d92557794199a64bf4215bdc0ac5ed5515bc5937683f169db71fb520186f2",
+    "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp": "d5521fbe4a84c0b874fd454c1244d24a7c974782f765287320b92148fc08f5a2"
+  },
+  "qualification": "Statistically supported uncached32K prefill benefit in original measured artifact; cold/decode/C2 gates remain inconclusive. Packaged source passes canonical-source/format/build checks; no default promotion or binary performance-equivalence claim.",
+  "packaged_binary_sha256": "386c4a11a10ae3d85030e58662a766a689941bcdb45e67f56508af30f3de262a",
+  "packaged_release_build": "passed; same release preset, ROCm7.14.1, gfx1151",
+  "packaged_model_parity": "five TP2 request comparisons pass,25 extra work checks pass, four captured driver counter windows clean; no timing-equivalence claim",
+  "clean_index_apply_and_hash_check": "baseline plus optional fusion patch applies cleanly at pinned base; all ten source hashes match"
+}
