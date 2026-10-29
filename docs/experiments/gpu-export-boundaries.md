@@ -23,4 +23,4 @@ Build with the existing script, specifying HIPCC/HIP_PATH and VERBS_INCLUDE/VERB
 
 Start the peer with the same options plus `--host HEAD_IP`. Repeat with `--remote-error` in place of `--signal-all`, then with `--host-mr --remote-error`. Existing driver setup and provider environment remain prerequisites; these commands do not configure or load a module.
 
-This is bounded correctness coverage, not a full-size matrix, overnight or performance qualification. The change affects the verifier only; no driver or production Gufo behavior changes.
+Follow-up: the built-in11-size matrix also passes all three paired cases, one iteration and two rounds. This produces528 per-host operation/size/round records and 5900012832 verified payload bytes across both hosts, including zero-length, page-boundary and up-to32MiB-minus64 transfers. Both hosts restore cleanly. This remains finite correctness coverage, not overnight or performance qualification. The change affects the verifier only; no driver or production Gufo behavior changes.
