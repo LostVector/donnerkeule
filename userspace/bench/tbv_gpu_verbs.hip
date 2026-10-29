@@ -75,6 +75,13 @@ struct Pool {
 		HIP(hipMemGetHandleForAddressRange(&exported.fd,
 			reinterpret_cast<hipDeviceptr_t>(data), bytes,
 			hipMemRangeHandleTypeDmaBufFd, 0));
+		// HIP allocation bounds do not establish DMA-BUF object bounds:
+		// small allocations can share an exported slab at nonzero offsets.
+		// This verifier deliberately requires dedicated pools, including for
+		// its invalid-import probes, so reject a larger exported object.
+		const off_t exported_bytes = lseek(exported.fd, 0, SEEK_END);
+		if (exported_bytes < 0 || static_cast<uint64_t>(exported_bytes) != bytes)
+			throw std::runtime_error("DMA-BUF must match dedicated pool size; suballocated exports are unsupported");
 	}
 };
 
