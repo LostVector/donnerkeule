@@ -12,6 +12,13 @@
 > for context, narrative, notes and benchmarks see the Hellas blog post:
 > https://blog.hellas.ai/blog/thunderbolt-ibverbs/
 
+## Tested dual-Strix-Halo Gufo settings
+
+See [TP2 tuning and launch guide](docs/TP2_TUNING.md) for the measured
+short/prefill profiles, a portable one-command-per-rank launcher, performance
+tradeoffs, exact-stack prerequisites and unresolved qualification limits.
+These are experimental starting points, not a universally optimal production setup.
+
 ## what is it?
 a linux kernel module + userspace shim to emulate an InfiniBand RDMA verb device across generic usb4/thunderbolt4 DMA rings
 

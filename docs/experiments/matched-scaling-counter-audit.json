@@ -1,0 +1,42 @@
+[
+  {
+    "phase": "one1",
+    "rank": 0,
+    "nonzero": {}
+  },
+  {
+    "phase": "one1",
+    "rank": 1,
+    "nonzero": {}
+  },
+  {
+    "phase": "two1",
+    "rank": 0,
+    "nonzero": {}
+  },
+  {
+    "phase": "two1",
+    "rank": 1,
+    "nonzero": {}
+  },
+  {
+    "phase": "two2",
+    "rank": 0,
+    "nonzero": {}
+  },
+  {
+    "phase": "two2",
+    "rank": 1,
+    "nonzero": {}
+  },
+  {
+    "phase": "one2",
+    "rank": 0,
+    "nonzero": {}
+  },
+  {
+    "phase": "one2",
+    "rank": 1,
+    "nonzero": {}
+  }
+]

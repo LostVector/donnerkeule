@@ -1,0 +1,9 @@
+{
+  "changed_instruction_lines": 16,
+  "changed_instruction_pairs": 8,
+  "all_changes": "PC-relative s_add_u32 address immediates",
+  "observed_rodata_difference": "Build source path and diagnostic-string ordering in DeepSeek MMQ quantize no_device_code/printf object. Both retain unsupported-NVFP4 diagnostic.",
+  "other_embedded_GPU_text_objects_match": 70,
+  "total_objects": 71,
+  "scope": "Instruction-level diff; descriptors/metadata are not fully qualified by this check. Functional model parity is separate."
+}

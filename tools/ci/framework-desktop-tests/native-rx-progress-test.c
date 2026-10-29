@@ -13,6 +13,7 @@ typedef uint32_t u32;typedef uint64_t u64;
 #define to_delayed_work(p) container_of(p,struct delayed_work,work)
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x,v) ((x)=(v))
+#define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
 #define max_t(t,a,b) ((t)(a)>(t)(b)?(t)(a):(t)(b))
 #define msecs_to_jiffies(x) (x)
 #define spin_lock_irqsave(p,f) do{(f)=0;assert(!pthread_mutex_lock(p));}while(0)
@@ -25,6 +26,13 @@ struct tbv_path {pthread_mutex_t rx_progress_lock;struct delayed_work rx_progres
 struct tbv_perf_id {u32 rail;u64 token;};
 static _Atomic long native_rx_progress_irqs,native_rx_progress_runs,native_rx_progress_frames,native_rx_progress_empty,native_rx_progress_budget;
 static void atomic64_inc(_Atomic long *v){atomic_fetch_add(v,1);}static void atomic64_add(unsigned n,_Atomic long *v){atomic_fetch_add(v,n);}
+static unsigned native_rx_active_poll_us;
+static bool native_rx_active_poll_full;
+static u64 fake_ns;
+static unsigned relax_calls;
+static u64 ktime_get_ns(void){fake_ns+=1000;return fake_ns;}
+static void cpu_relax(void){relax_calls++;}
+#include "rx_active_poll.h"
 static unsigned native_rx_recheck_ms=1;static int system_unbound_wq;
 static int poll_calls,rearms,callbacks,next_expected;static bool inject_irq_at_complete;static struct tbv_path *current;
 static bool mod_delayed_work(int q,struct delayed_work *w,unsigned long delay){(void)q;w->pending=true;w->delay=delay;return true;}
@@ -48,10 +56,36 @@ int main(void){
  /* IRQ at rearm must retain immediate work; idle recheck must not delay it. */
  inject_irq_at_complete=true;run(&path);assert(path.rx_progress_work.pending && path.rx_progress_work.delay==0);
  native_rx_recheck_ms=0;run(&path);assert(!path.rx_progress_work.pending);
+ /* Active polling expires at a fixed deadline, and never spins on an empty entry. */
+ native_rx_active_poll_us=100;fake_ns=0;relax_calls=0;
+ ring.next=1024;next_expected=1024;run(&path);
+ assert(callbacks==1026 && relax_calls==19 && fake_ns==21000);
+ relax_calls=0;run(&path);assert(!relax_calls);
+ native_rx_active_poll_us=0;
  /* Disable/enqueue race: after disable returns, even ongoing IRQ producers
   * cannot requeue. This executes the real lock-and-enqueue helper. */
  pthread_t irq;assert(!pthread_create(&irq,NULL,irq_loop,&path));sched_yield();tbv_path_rx_progress_disable(&path);assert(!pthread_join(irq,NULL));assert(!path.rx_progress_work.pending && !path.rx_progress_enabled);
  int oldpoll=poll_calls,oldrearm=rearms;run(&path);assert(poll_calls==oldpoll && rearms==oldrearm);
- assert(callbacks==1025 && next_expected==1025 && native_rx_progress_budget==4);
+ assert(callbacks==1026 && next_expected==1025 && native_rx_progress_budget==4);
+ /* A burst can use the full configured window, bounded from entry. */
+ path.rx_progress_enabled=true;native_rx_active_poll_us=100;
+ ring.next=1017;next_expected=1017;fake_ns=0;relax_calls=0;
+ run(&path);assert(callbacks==1034 && next_expected==1025);
+ assert(relax_calls==99 && fake_ns==101000);
+ /* Full mode extends a one-frame batch, but not an empty entry. */
+ native_rx_active_poll_full=true;ring.next=1024;next_expected=1024;
+ fake_ns=0;relax_calls=0;run(&path);
+ assert(callbacks==1035 && relax_calls==99 && fake_ns==101000);
+ relax_calls=0;run(&path);assert(!relax_calls);
+ /* The polling window remains disabled when its duration is zero. */
+ native_rx_active_poll_us=0;ring.next=1024;next_expected=1024;
+ relax_calls=0;run(&path);assert(callbacks==1036 && !relax_calls);
+ tbv_path_rx_progress_disable(&path);
+ for(unsigned us=0;us<=1000;us++)for(unsigned n=0;n<=256;n++) {
+  unsigned w=tbv_rx_active_window_us(us,n,false);
+  assert(tbv_rx_active_window_us(us,n,true)==us);
+  assert(w<=us && w<=1000);
+  if(n<8)assert(w<=20);else assert(w==us);
+ }
  puts("PASS: ordered1025-frame drain, bounded batches, IRQ/rearm priority, IRQ-only, disabled state,100000 concurrent IRQ/disable attempts");
 }

@@ -1,0 +1,110 @@
+[
+  {
+    "phase": "two-b1",
+    "rank": 0,
+    "interval": "load-and-inference",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-b1",
+    "rank": 0,
+    "interval": "teardown",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-b1",
+    "rank": 1,
+    "interval": "load-and-inference",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-b1",
+    "rank": 1,
+    "interval": "teardown",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-c1",
+    "rank": 0,
+    "interval": "load-and-inference",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-c1",
+    "rank": 0,
+    "interval": "teardown",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-c1",
+    "rank": 1,
+    "interval": "load-and-inference",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-c1",
+    "rank": 1,
+    "interval": "teardown",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-c2",
+    "rank": 0,
+    "interval": "load-and-inference",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-c2",
+    "rank": 0,
+    "interval": "teardown",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-c2",
+    "rank": 1,
+    "interval": "load-and-inference",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-c2",
+    "rank": 1,
+    "interval": "teardown",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-b2",
+    "rank": 0,
+    "interval": "load-and-inference",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-b2",
+    "rank": 0,
+    "interval": "teardown",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-b2",
+    "rank": 1,
+    "interval": "load-and-inference",
+    "nonzero": {}
+  },
+  {
+    "phase": "two-b2",
+    "rank": 1,
+    "interval": "teardown",
+    "nonzero": {}
+  },
+  {
+    "phase": "live-payload-tests",
+    "rank": 0,
+    "interval": "whole-campaign",
+    "nonzero": {}
+  },
+  {
+    "phase": "live-payload-tests",
+    "rank": 1,
+    "interval": "whole-campaign",
+    "nonzero": {}
+  }
+]

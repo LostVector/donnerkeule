@@ -1,0 +1,25 @@
+{
+  "base_commit": "0b6978aa1709f2ef863f5407e4ca7261191e9046",
+  "measured_reference_binary_sha256": "b288378fe41039f940aed5747c21c0964d9937e0f586e2cef063a2fd087f7599",
+  "runtime_sources": {
+    "src/models/qwen38_flash_next/kernels/rocm/executor.cpp": "1a95c15bcd7a49a9da3a7b0849faa6b503713bd23476f2f95214d1456ad9fce2",
+    "src/models/qwen38_flash_next/kernels/rocm/executor.hpp": "e5e43cc3923fb2ae7aea6622c57237aa3565e5dd51c1ea29c682147339b29899",
+    "src/models/qwen38_flash_next/kernels/rocm/batch.cpp": "e550580fccfb897eaa2b61284a395c7044f845b4c28d12803ee1dc8259becd89",
+    "src/models/qwen38_flash_next/kernels/rocm/verbs.cpp": "3f57313b9030c771fe2d7175773f382afb764db816b826b13f43281effbbdaa3",
+    "src/models/qwen38_flash_next/engine.cpp": "3054428e91ced6bf37f2fdaac3aaca5c7ce415d6fd6a47fb4ef5c0a1e1b992fa",
+    "src/models/qwen38_flash_next/CMakeLists.txt": "6cbc306c167efacb4a628aa4079b37136ca41d802b7a5a3e87c81683f6159749",
+    "src/models/qwen38_flash_next/kernels/rocm/tp_trace.hpp": "a87baf4bf16f98a3a08f8c163d5581b30a71934b2c308203844731261ef1ce43",
+    "tests/models/qwen38_flash_next/head_gather_ops_probe.cpp": "7b43c94fc8e16b3517db51baa73dd3aff6f1b96e2f09b62eca36de09c04d0b35"
+  },
+  "patch_sha256": "64113a5f37daf8c6fe213bb75a772ad9fe918c54d9cae0c0686b01a2b78c60f8",
+  "packaging_only_difference": "Removed external lab-only EXCLUDE_FROM_ALL reuse target; added an in-repository EXCLUDE_FROM_ALL independent head-gather probe; no production target logic change.",
+  "trace_default": "OFF",
+  "ngram_policy_unchanged": true,
+  "fusion_excluded": true,
+  "formatter": "clang-format21.1.8; cached Fedora43 toolbox imagec7189f390830; offline/read-only runtime",
+  "format_ci": "tools/ci/check-format.py passed692 C++ files",
+  "formatted_binary": "gufo (local qualification artifact; build from source)",
+  "formatted_binary_sha256": "21839bd9d969e52336c00d2bd8e81eaef4e3e44912cb34a777276a06506f42b1",
+  "runtime_model_parity": "10 same-world request output/work comparisons passed: TP1 andTP2",
+  "head_gather_probe": "40 exact cases per rank on real two-node native host transport"
+}

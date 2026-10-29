@@ -16,6 +16,7 @@ class NativeRxProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'helpers.c').write_text(functions(source, names))
+            (root / 'rx_active_poll.h').write_text(source_file('kernel/rx_active_poll.h'))
             flags = ['-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-pthread']
             if os.environ.get('TBV_TEST_SANITIZERS') == '1':
                 flags.append('-fsanitize=address,undefined')

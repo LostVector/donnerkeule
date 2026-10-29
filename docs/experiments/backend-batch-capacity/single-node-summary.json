@@ -1,0 +1,49 @@
+{
+  "starts": [
+    {
+      "phase": "one-b1",
+      "chunk": 4096,
+      "median_tps": 1650.1729275624673,
+      "output_hashes": [
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d",
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d",
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d"
+      ]
+    },
+    {
+      "phase": "one-c1",
+      "chunk": 8192,
+      "median_tps": 1669.3603840369924,
+      "output_hashes": [
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d",
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d",
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d"
+      ]
+    },
+    {
+      "phase": "one-c2",
+      "chunk": 8192,
+      "median_tps": 1664.5741430147536,
+      "output_hashes": [
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d",
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d",
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d"
+      ]
+    },
+    {
+      "phase": "one-b2",
+      "chunk": 4096,
+      "median_tps": 1640.9053200488195,
+      "output_hashes": [
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d",
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d",
+        "6c9a9133d576ba5156826e38d9530111e5ee1603c67ea8aa3a1d3105d4afa56d"
+      ]
+    }
+  ],
+  "median_of_start_medians": {
+    "4096": 1645.5391238056434,
+    "8192": 1666.967263525873
+  },
+  "ratio": 1.0130219570049923
+}

@@ -94,18 +94,19 @@ patch is needed: native_tx_max_inflight is already writable at runtime.
 Raw artifacts and reproducible controllers are retained on the test hosts under
 `~/strix-dispatch-investigation/link40/`. Published [bulk CSV](tx-window-repeat-bulk.csv)
 and [serving CSV](tx-window-repeat-serving.csv) retain each phase separately.
-The frozen private engine/module provenance is described above; these
-measurements do not qualify this exact clean module, polling combinations or
-another model.
+The frozen private engine/module prerequisites remain those in TP2_TUNING.md;
+these measurements do not qualify this exact combined module, polling
+combinations or another model.
 
-## Proposed default change in this draft PR
+## Native default in the experimental fork
 
 Set only the native Linux parameter's initial value to128. The shared fallback
 limit stays32, so Apple/non-native paths retain their prior limit. Users can
 select native_tx_max_inflight=32 at load time or while idle to reproduce the
 control. Runtime ring-size clamping and0(disable throttle) semantics remain.
 
-Hardware evidence uses pinned private81C6 with ordering/retirement fixes; this
-clean branch is stacked on fix/native-rx-progress and has not been hardware-
-loaded. It does not carry every private-stack prerequisite. Keep draft pending
-combined-stack qualification and resolution of the documented timing concerns.
+Hardware evidence uses pinned private81C6 with ordering/retirement fixes. The
+combined fork includes the RC ordering and retirement fixes, but the exact
+combined polling/default128 module still needs hardware qualification. Merging
+into the experimental fork does not resolve the documented timing flags or
+change the loaded32-window baseline on the test hosts.

@@ -1,0 +1,238 @@
+--- a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+@@ -2027,7 +2027,7 @@
+ }  // namespace
+ 
+ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
+-                       const float* inject_w) const {
++                       const float* inject_w, const float* peer) const {
+   const Config& c = config();
+   inject_fused_ = nullptr;
+   // Wide batches hand the next mixer an F16 norm for its epilogue and the
+@@ -2082,7 +2082,7 @@
+         HcCombineF16(res, s_.block_out, s_.inject, inject_parts_, gamma,
+                      s_.xn_half, s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count,
+                      c.rms_eps, stream_, defer_now ? s_.hc_defer_w : nullptr,
+-                     s_.inject, defer_now ? fused_inject : nullptr);
++                     s_.inject, defer_now ? fused_inject : nullptr, peer);
+     if (res_deferred_)
+       inject_fused_ = fused_inject;
+     return;
+@@ -2809,6 +2809,9 @@
+   reduce.start = [communicator](const float* data, std::size_t bytes,
+                                 hipStream_t stream, std::string* error) {
+     return communicator->StartPartial(data, bytes, stream, error);
++  };
++  reduce.finish_peer = [communicator](std::size_t bytes, std::string* error) {
++    return communicator->FinishPartial(bytes, error);
+   };
+   reduce.finish = [communicator = std::move(communicator), hidden](
+                       float* data, std::size_t bytes, hipStream_t stream,
+@@ -3790,8 +3793,9 @@
+     const std::int32_t* tokens;
+     bool normed;
+     std::uint32_t inject_parts;
+-    std::uint32_t part;  ///< the next part to run
+-    bool pending;        ///< its last part's sum is in flight
++    std::uint32_t part;           ///< the next part to run
++    bool pending;                 ///< its last part's sum is in flight
++    const float* peer = nullptr;  ///< consumed immediately by the next MoE part
+   };
+   const Scratch base = s_;
+   std::array<Lane, 2> lanes{
+@@ -3870,8 +3874,14 @@
+         if (!model_->layers()[il].mixer_split) {
+           continue;
+         }
+-      } else if (!MoePart(il, lane.batch.n, false, error_msg)) {
+-        return false;
++      } else {
++        // finish() has just completed this lane's attention exchange. Consume
++        // the peer on the main stream before publishing the next ready event.
++        const float* peer = lane.peer;
++        lane.peer = nullptr;
++        if (!MoePart(il, lane.batch.n, false, error_msg, peer)) {
++          return false;
++        }
+       }
+       if (!options_.split_reduce.start(s_.block_out, bytes(lane), stream_,
+                                        error_msg)) {
+@@ -3894,16 +3904,30 @@
+     in_flight[0] = in_flight[1];
+     --flying;
+     lane.pending = false;
+-    if (!options_.split_reduce.finish(s_.block_out, bytes(lane), stream_,
+-                                      error_msg)) {
+-      return false;
+-    }
+     const std::uint32_t part = lane.part - 1;
++    const std::uint32_t il = part / 2;
++    const bool fuse_peer =
++        options_.split_reduce.finish_peer && !options_.moe_observer &&
++        wide_mixer_ && MatrixRows(lane.batch.n) && c.hc_count == 4 &&
++        c.hidden_size % 128 == 0 && c.hidden_size <= 2560 &&
++        (part % 2 == 0 || (il + 1 < c.num_layers && !c.IsPleLayer(il + 1))) &&
++        !defer_residual_ && !res_deferred_ && !moe_pending_;
++    const float* peer = nullptr;
++    if (fuse_peer) {
++      peer = options_.split_reduce.finish_peer(bytes(lane), error_msg);
++      if (!peer)
++        return false;
++    } else if (!options_.split_reduce.finish(s_.block_out, bytes(lane), stream_,
++                                             error_msg)) {
++      return false;
++    }
+     if (part % 2 == 1) {
+       if (options_.moe_observer) {
+         options_.moe_observer(s_.block_out, bytes(lane), stream_);
+       }
+-      lane.normed = LayerBack(part / 2, lane.batch.n);
++      lane.normed = LayerBack(part / 2, lane.batch.n, peer);
++    } else {
++      lane.peer = peer;
+     }
+     return true;
+   };
+@@ -4061,26 +4085,27 @@
+ }
+ 
+ bool Executor::MoePart(std::uint32_t il, std::uint32_t n_tokens, bool reduce,
+-                       std::string* error_msg) const {
++                       std::string* error_msg, const float* peer) const {
+   const DeviceLayer& l = model_->layers()[il];
+   // Each combine also norms the residual for the mixer that follows it,
+   // unless PLE rewrites the residual first.
+-  Combine(s_.res, l.hc_ffn.norm.f32(), n_tokens, InjectWeights(l.hc_ffn));
++  Combine(s_.res, l.hc_ffn.norm.f32(), n_tokens, InjectWeights(l.hc_ffn), peer);
+   return HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, n_tokens,
+                error_msg) &&
+          Moe(l, s_.mixed, s_.block_out, n_tokens, error_msg, false, reduce);
+ }
+ 
+-bool Executor::LayerBack(std::uint32_t il, std::uint32_t n_tokens) const {
++bool Executor::LayerBack(std::uint32_t il, std::uint32_t n_tokens,
++                         const float* peer) const {
+   const Config& c = config();
+   const float* next_norm =
+       il + 1 < c.num_layers
+           ? (c.IsPleLayer(il + 1) ? nullptr
+                                   : model_->layers()[il + 1].hc_attn.norm.f32())
+           : nullptr;  // the head norms the rows it reads itself
+-  Combine(
+-      s_.res, next_norm, n_tokens,
+-      next_norm ? InjectWeights(model_->layers()[il + 1].hc_attn) : nullptr);
++  Combine(s_.res, next_norm, n_tokens,
++          next_norm ? InjectWeights(model_->layers()[il + 1].hc_attn) : nullptr,
++          peer);
+   return next_norm != nullptr;
+ }
+ 
+--- a/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/executor.hpp
+@@ -248,6 +248,9 @@
+     std::function<bool(const float*, std::size_t, hipStream_t, std::string*)>
+         start;
+     std::function<bool(float*, std::size_t, hipStream_t, std::string*)> finish;
++    // Optional ordered finish without addition. Peer is consumed on the main
++    // stream before a later StartPartial event can release its reusable slot.
++    std::function<const float*(std::size_t, std::string*)> finish_peer;
+   };
+ 
+   struct Options {
+@@ -589,7 +592,8 @@
+   /// mixer's F32 `inject_w`, the fused MoE combine also leaves its inject
+   /// partials in s_.inject (inject_fused_).
+   void Combine(float* res, const float* gamma, std::uint32_t n_tokens,
+-               const float* inject_w = nullptr) const;
++               const float* inject_w = nullptr,
++               const float* peer = nullptr) const;
+   /// Hashes the batch's n-gram rows and starts reading them from disk, so
+   /// the read overlaps the layers before the PLE one.
+   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
+@@ -694,10 +698,11 @@
+   /// block, the FFN mixer and the experts. Without `reduce`, a distributed
+   /// rank's output is still its partial.
+   bool MoePart(std::uint32_t il, std::uint32_t n_tokens, bool reduce,
+-               std::string* error_msg) const;
++               std::string* error_msg, const float* peer = nullptr) const;
+   /// The layer's final combine; returns whether it also normed the residual
+   /// for the next mixer.
+-  bool LayerBack(std::uint32_t il, std::uint32_t n_tokens) const;
++  bool LayerBack(std::uint32_t il, std::uint32_t n_tokens,
++                 const float* peer = nullptr) const;
+   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
+                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
+                const float* hidden_source, MtpTrace* trace, bool kv_only,
+--- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp
+@@ -807,12 +807,14 @@
+ /// between the two passes, reduces the four stream norms in one block
+ /// reduction, and quantizes each 32-wide block over its eight lanes with a
+ /// four-code store. Rows of four streams up to 2,560 wide.
+-template<typename XnT, bool kDefer = false, bool kInject = false>
++template<typename XnT, bool kDefer = false, bool kInject = false,
++         bool kPeer = false>
+ __global__ void HcCombineVec4Kernel(
+     float* res, const float* block_out, const float* inject,
+     std::uint32_t inject_parts, const float* gamma, XnT* xn, void* xn_q8,
+     std::uint32_t hidden, float eps, float* defer_w,
+-    const float* inject_w = nullptr, float* inject_out = nullptr) {
++    const float* inject_w = nullptr, float* inject_out = nullptr,
++    const float* peer = nullptr) {
+   constexpr std::uint32_t kStreams = 4;
+   constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
+   __shared__ float shared[kStreams][kThreads / 32];
+@@ -853,7 +855,14 @@
+       const std::uint32_t i = e - (s * hidden);
+       const float ws = w[s];
+       const float4 r = *reinterpret_cast<const float4*>(dst + e);
+-      const float4 b = *reinterpret_cast<const float4*>(src + i);
++      float4 b = *reinterpret_cast<const float4*>(src + i);
++      if constexpr (kPeer) {
++        const float4 p = *reinterpret_cast<const float4*>(
++            peer + static_cast<std::size_t>(t) * hidden + i);
++        // Preserve the separately stored FP32 sum before HC multiply/add.
++        b = float4{__fadd_rn(b.x, p.x), __fadd_rn(b.y, p.y),
++                   __fadd_rn(b.z, p.z), __fadd_rn(b.w, p.w)};
++      }
+       v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
+                     r.w + b.w * ws};
+       if constexpr (!kDefer) {
+@@ -6149,7 +6158,16 @@
+                   std::uint32_t inject_parts, const float* gamma, __half* xn,
+                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
+                   std::uint32_t streams, float eps, hipStream_t stream,
+-                  float* defer_w, float* inject_out, const float* inject_w) {
++                  float* defer_w, float* inject_out, const float* inject_w,
++                  const float* peer) {
++  // Peer route is admitted only for this non-deferred shape by Executor.
++  if (peer != nullptr) {
++    hipLaunchKernelGGL((HcCombineVec4Kernel<__half, false, false, true>),
++                       dim3(n_tokens), dim3(kThreads), 0, stream, res,
++                       block_out, inject, inject_parts, gamma, xn, xn_q8,
++                       hidden, eps, nullptr, nullptr, nullptr, peer);
++    return false;
++  }
+   // F16 prefill keeps the same reduction even for a one-token tail.
+   if (streams == 4 && hidden % 128 == 0 && hidden <= 2560) {
+     if (inject_w != nullptr && defer_w != nullptr && gamma != nullptr) {
+@@ -6165,7 +6183,7 @@
+                                             : HcCombineVec4Kernel<__half>;
+     hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
+                        block_out, inject, inject_parts, gamma, xn, xn_q8,
+-                       hidden, eps, defer_w, nullptr, nullptr);
++                       hidden, eps, defer_w, nullptr, nullptr, nullptr);
+     return defer_w != nullptr;
+   }
+   hipLaunchKernelGGL(HcCombineKernel<__half>, dim3(n_tokens, streams),
+--- a/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/kernels.hpp
+@@ -121,7 +121,7 @@
+                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
+                   std::uint32_t streams, float eps, hipStream_t stream,
+                   float* defer_w = nullptr, float* inject_out = nullptr,
+-                  const float* inject_w = nullptr);
++                  const float* inject_w = nullptr, const float* peer = nullptr);
+ /// Applies the residual update a deferring HcCombineF16 left out (four
+ /// streams), with the same arithmetic.
+ void HcApplyDeferred(float* res, const float* block_out, const float* w,

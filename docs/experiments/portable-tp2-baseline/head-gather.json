@@ -1,0 +1,19 @@
+{
+  "binary_sha256": "596738b97b22c408f3d2414248a4a87befd87bfd778cd11c1e55f41c0c08472f",
+  "cases_per_rank": 40,
+  "rows": [
+    1,
+    2
+  ],
+  "half_values": [
+    1,
+    32,
+    257,
+    65537,
+    124160
+  ],
+  "repetitions": 4,
+  "transport": "real native host windows on two Strix Halos, four rails",
+  "oracle": "independent CPU row-wise rank0/rank1 bit concatenation",
+  "scope": "Data ordering/copy correctness; not model accuracy or a dispatch-overhead mock"
+}

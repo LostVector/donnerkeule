@@ -1,0 +1,30 @@
+[
+  {
+    "a": "b1",
+    "b": "b2",
+    "requests": 3,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  },
+  {
+    "a": "c1",
+    "b": "c2",
+    "requests": 3,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  },
+  {
+    "a": "b1",
+    "b": "c1",
+    "requests": 3,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  },
+  {
+    "a": "b2",
+    "b": "c2",
+    "requests": 3,
+    "work_mismatches": 0,
+    "output_mismatches": 0
+  }
+]
