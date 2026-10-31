@@ -2,12 +2,21 @@
 
 Updated 2026-10-28 on GMKtec EVO-X2 + Corsair AI Workstation300,
 each Ryzen AI Max+395/128GB. Initial measurements used20Gbit/s per direction;
-each cable now qualifies at40Gbit/s (20Gbit/s/lane ×2), with two cables tested.
+historical runs also observed40Gbit/s per cable. Current doctor readback on
+2026-10-30 is20Gbit/s per direction per cable (10Gbit/s/lane ×2), with two
+physical cables/four native rails. Use current sysfs readings when comparing runs.
 This records our best-tested **experimental starting profiles**, not a proven
 universal optimum. It includes a one-command-per-rank launcher **after the
 compatible driver, provider and Gufo are installed**. It is not a fresh-OS
 installer; pinned source bundles, dependencies and bounded qualification are
 linked below.
+
+## Preflight before launching
+
+Run the [read-only dual Strix doctor](DUAL_STRIX_DOCTOR.md) against the management
+SSH peer to check running boot policy, both physical cables and peer UUIDs, native
+rails, provider visibility and configuration parity. Unknown/protected checks are
+reported explicitly; this does not replace payload or inference qualification.
 
 ## Merged fork driver checked on this pair
 
