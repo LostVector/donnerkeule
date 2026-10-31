@@ -131,47 +131,47 @@ must not be labeled a zero-error performance sample.
 
 ## Additional matched Linux qualification (2026-10-31)
 
-The same844E module was tested on the existing Linux7.3/BDA-core dual-Strix pair,
-with matched TTM/IOMMU-off flags, TX32, RXprogress1/recheck1ms and active polling0.
+The same 844E module was tested on the existing Linux 7.3/BDA core dual-Strix pair,
+with matched TTM/IOMMU-off flags, TX32, RX progress 1/recheck 1 ms and active polling 0.
 A Corsair-only cable crossover changed the physical layout; one link negotiated
-40Gb/s per direction and the other20Gb/s. This is not rate-matched to the earlier
+40 Gb/s per direction and the other 20 Gb/s. This is not rate-matched to the earlier
 hardware-error runs. Four rails remained active per host.
 
 A fixed parent/fix/fix/parent sequence used the identical ccdb9495 Gufo engine,
-UD-Q4_K_XL plus sharedQ8MTP, context65536, sessions2, chunk2048 and1GiBcache.
-All24 canonical prompt/cache/output identities matched; all8 C2requests executed
-at width2. All8 transport counter windows were error-free. No per-request phase
-regression exceeded both5% and3ms against either parent start. The prior unmatched
-+248ms C2flag did not recur; this does not universally clear it.
+UD-Q4_K_XL plus shared Q8 MTP, context 65536, sessions 2, chunk 2048 and 1 GiB cache.
+All 24 canonical prompt/cache/output identities matched; all 8 C2 requests executed
+at width 2. All 8 transport counter windows were error-free. No per-request phase
+regression exceeded both 5% and 3 ms against either parent start. The prior unmatched
++248 ms C2 flag did not recur; this does not universally clear it.
 
 | Metric | Parent starts | Fixed starts |
 |---|---|---|
-|32Kprefill tok/s|2046.62 /2035.45|2039.47 /2037.48|
-|C1MTPdecode tok/s|56.995 /56.958|57.350 /56.898|
-|C2whole-wave tok/s|69.800 /68.568|71.254 /70.660|
+| 32K prefill tok/s | 2046.62 / 2035.45 | 2039.47 / 2037.48 |
+| C1 MTP decode tok/s | 56.995 / 56.958 | 57.350 / 56.898 |
+| C2 whole-wave tok/s | 69.800 / 68.568 | 71.254 / 70.660 |
 
-C2draft work differs, with24 retained metric comparisons against the two parent
+C2 draft work differs, with 24 retained metric comparisons against the two parent
 starts (reused observations, not independent samples). These four starts do not
 establish a speedup, statistical equivalence or default-adoption qualification.
-Built-parent667ac2 and candidate-base3dbaaa kernel sources are byte-identical.
+Built parent 667ac2 and candidate base 3dbaaa kernel sources are byte-identical.
 
-A separate host-only run loaded844E once per host for26cases:
+A separate host-only run loaded 844E once per host for 26 cases:
 
-- Eight WRITE_WITH_IMM cases: each direction, depth128,5MiB/WR,two rounds,
+- Eight WRITE_WITH_IMM cases: each direction, depth 128, 5 MiB/WR, two rounds,
   disjoint/full overlap/partial overlap/physical-alias destinations.
-- Six SEND_WITH_IMM cases: each direction at depth1/8KiB/64rounds,
-  depth32/64KiB/32rounds and depth128/5MiB/two rounds. Posted receive SGEs,
+- Six SEND_WITH_IMM cases: each direction at depth 1/8 KiB/64 rounds,
+  depth 32/64 KiB/32 rounds and depth 128/5 MiB/two rounds. Posted receive SGEs,
   byte lengths, immediate sequence, every payload word, CQ order and reuse checked.
-- Four deliberate sender exits, each direction after8or128accepted WRs in a
-  depth128/5MiB batch. Sender exits99; receiver exits2 with WCstatus5 (flush).
-  Each receiver records one ACKerror, one reorder drop and one reorder timeout.
-- Eight subsequent SEND/WRITE checks on fresh QPs: depth8/64KiB/32rounds.
+- Four deliberate sender exits, each direction after 8 or 128 accepted WRs in a
+  depth 128/5 MiB batch. Sender exits 99; receiver exits 2 with WC status 5 (flush).
+  Each receiver records one ACK error, one reorder drop and one reorder timeout.
+- Eight subsequent SEND/WRITE checks on fresh QPs: depth 8/64 KiB/32 rounds.
   All pass without a driver reload. The old failed QP is not recovered.
 
-All22successful cases have zero checked transport-error/retransmission deltas.
+All 22 successful cases have zero checked transport-error/retransmission deltas.
 Overlapping/aliased WRITE tests check the final observable destination state,
 not overwritten intermediate payloads. Expected exit-window errors are retained
-separately. Both approved81C6/TX32 drivers are restored idle, with four rails;
+separately. Both approved 81C6/TX32 drivers are restored idle, with four rails;
 checked kernel crash/lockup patterns are absent. No Halogen restart.
 
 These Linux TBV-framed tests do not exercise headerless RAW, physical cable loss
@@ -182,7 +182,7 @@ automatic RAW recovery remain unqualified. This is not all-verbs/overnight
 certification. No production source or default changed in this follow-up.
 
 The local investigation retains frozen protocols/source hashes, exact commands,
-per-request data and all26 host logs/counter windows in
+per-request data and all 26 host logs/counter windows in
 `tp-cache-retention/driver-parent-timing-v1/` and
 `driver-frame-investigation/recovery-qualification-v1/`. Those lab harnesses are
 not bundled in this PR; the shipped WRITE integrity tool above remains the
