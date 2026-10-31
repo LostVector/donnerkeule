@@ -1,0 +1,1070 @@
+{
+  "host_qualification": {
+    "complete_and_restored": true,
+    "planned_cases": 26,
+    "recorded_cases": 26,
+    "records": [
+      {
+        "label": "write-0-disjoint",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.2721559720002915,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "write-0-overlap",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "overlap",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.219801959000506,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "write-0-partial",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "partial",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.3825511989998631,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "write-0-alias",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "alias",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.22545104099936,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "send-0-1-8192",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 1,
+        "bytes": 8192,
+        "rounds": 64,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.7464107350006088,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "send-0-32-65536",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 32,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.7944450759996471,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "send-0-128-5242880",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.4171737289998418,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "exit-0-8",
+        "kind": "exit",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 1,
+        "pattern": "disjoint",
+        "abort": 8,
+        "exits": [
+          2,
+          99
+        ],
+        "seconds_including_CPU_and_control_fences": 1.4832224749998204,
+        "errors": {
+          "0": {
+            "data_tx_ack_error": 1,
+            "data_rx_reorder_dropped": 1,
+            "data_rx_reorder_timeout": 1
+          },
+          "1": {}
+        }
+      },
+      {
+        "label": "recovery-0-8-write",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.7311167000007117,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "recovery-0-8-send",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.7357607020003343,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "exit-0-128",
+        "kind": "exit",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 1,
+        "pattern": "disjoint",
+        "abort": 128,
+        "exits": [
+          2,
+          99
+        ],
+        "seconds_including_CPU_and_control_fences": 1.477399159000015,
+        "errors": {
+          "0": {
+            "data_tx_ack_error": 1,
+            "data_rx_reorder_dropped": 1,
+            "data_rx_reorder_timeout": 1
+          },
+          "1": {}
+        }
+      },
+      {
+        "label": "recovery-0-128-write",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.7343712029996823,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "recovery-0-128-send",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.7335222089996023,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "write-1-disjoint",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.1252112510001098,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "write-1-overlap",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "overlap",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.0663829799996165,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "write-1-partial",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "partial",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.2214338500007216,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "write-1-alias",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "alias",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.0709102239998174,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "send-1-1-8192",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 1,
+        "bytes": 8192,
+        "rounds": 64,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.5538711829995009,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "send-1-32-65536",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 32,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.6335982000000513,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "send-1-128-5242880",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 1.2717555440003707,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "exit-1-8",
+        "kind": "exit",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 1,
+        "pattern": "disjoint",
+        "abort": 8,
+        "exits": [
+          2,
+          99
+        ],
+        "seconds_including_CPU_and_control_fences": 1.2708415110000715,
+        "errors": {
+          "0": {},
+          "1": {
+            "data_tx_ack_error": 1,
+            "data_rx_reorder_dropped": 1,
+            "data_rx_reorder_timeout": 1
+          }
+        }
+      },
+      {
+        "label": "recovery-1-8-write",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.5395880779997242,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "recovery-1-8-send",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.5529869799993321,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "exit-1-128",
+        "kind": "exit",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 1,
+        "pattern": "disjoint",
+        "abort": 128,
+        "exits": [
+          2,
+          99
+        ],
+        "seconds_including_CPU_and_control_fences": 1.3405228969995733,
+        "errors": {
+          "0": {},
+          "1": {
+            "data_tx_ack_error": 1,
+            "data_rx_reorder_dropped": 1,
+            "data_rx_reorder_timeout": 1
+          }
+        }
+      },
+      {
+        "label": "recovery-1-128-write",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.5567155490007281,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      },
+      {
+        "label": "recovery-1-128-send",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint",
+        "exits": [
+          0,
+          0
+        ],
+        "seconds_including_CPU_and_control_fences": 0.5526864880002904,
+        "errors": {
+          "0": {},
+          "1": {}
+        }
+      }
+    ],
+    "kernel_fault_pattern_matches": [],
+    "scope": "Corrected844E/TX32 native RXprogress1/recheck1ms/activepoll0, crossed40+20Gbps pinned UUID/rates. Linux TBV framed path, host registered buffers, no GPU/model/profiler/NVMeadmin sampler. WRITE_WITH_IMM ordering/disjoint/overlap/partial/physical-alias and SEND_WITH_IMM disjoint at depth1/32/128. Sender _exit99 after8or128 accepted WRs; receiver must fail safely, then new QPs SEND/WRITE succeed WITHOUT module reload. No same-QP recovery guarantee; no physical cable disconnect/kernel crash injection; no activeRAW/headerloss or automatic RAW recovery qualification. Transport counters retained; successful cases stop on unexpected fault; faultcases separately accounted. Not a latency/throughput benchmark."
+  },
+  "protocol": {
+    "cases": [
+      {
+        "label": "write-0-disjoint",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "write-0-overlap",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "overlap"
+      },
+      {
+        "label": "write-0-partial",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "partial"
+      },
+      {
+        "label": "write-0-alias",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "alias"
+      },
+      {
+        "label": "send-0-1-8192",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 1,
+        "bytes": 8192,
+        "rounds": 64,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "send-0-32-65536",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 32,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "send-0-128-5242880",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "exit-0-8",
+        "kind": "exit",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 1,
+        "pattern": "disjoint",
+        "abort": 8
+      },
+      {
+        "label": "recovery-0-8-write",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "recovery-0-8-send",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "exit-0-128",
+        "kind": "exit",
+        "receiver": 0,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 1,
+        "pattern": "disjoint",
+        "abort": 128
+      },
+      {
+        "label": "recovery-0-128-write",
+        "kind": "write",
+        "receiver": 0,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "recovery-0-128-send",
+        "kind": "send",
+        "receiver": 0,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "write-1-disjoint",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "write-1-overlap",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "overlap"
+      },
+      {
+        "label": "write-1-partial",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "partial"
+      },
+      {
+        "label": "write-1-alias",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "alias"
+      },
+      {
+        "label": "send-1-1-8192",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 1,
+        "bytes": 8192,
+        "rounds": 64,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "send-1-32-65536",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 32,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "send-1-128-5242880",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 2,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "exit-1-8",
+        "kind": "exit",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 1,
+        "pattern": "disjoint",
+        "abort": 8
+      },
+      {
+        "label": "recovery-1-8-write",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "recovery-1-8-send",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "exit-1-128",
+        "kind": "exit",
+        "receiver": 1,
+        "depth": 128,
+        "bytes": 5242880,
+        "rounds": 1,
+        "pattern": "disjoint",
+        "abort": 128
+      },
+      {
+        "label": "recovery-1-128-write",
+        "kind": "write",
+        "receiver": 1,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      },
+      {
+        "label": "recovery-1-128-send",
+        "kind": "send",
+        "receiver": 1,
+        "depth": 8,
+        "bytes": 65536,
+        "rounds": 32,
+        "pattern": "disjoint"
+      }
+    ],
+    "driver": {
+      "sha256": "3237eefc6dea0ba3a9eea387022de1f2d84bf0fe6db12457ab5c0a9885cb7e81",
+      "srcversion": "844E9145B923CA473A7AD39",
+      "vermagic": "7.3.0-strix-test SMP preempt mod_unload modversions"
+    },
+    "harness_sha256": {
+      "driver-frame-investigation/recovery-qualification-v1/run.py": "b3bda3c4dd6e41c6b3826801366365c4e5426d5d5eca57c2c1df031fc9a4e349",
+      "driver-frame-investigation/recovery-qualification-v1/analyze.py": "56728565ac9dec0f0352bb2f260306bb7989bbed67add3231f3bbbf79bc754cb",
+      "driver-frame-investigation/recovery-qualification-v1/check-send.cpp": "fc2d2d5f89afdee557aa28d20c54ad829e44bb5f1fc61deb6f058496f5f0a403",
+      "driver-frame-investigation/recovery-qualification-v1/check-peer-exit.cpp": "986ca7c6696b590fc5a526dd8c41c432d2c477bf7f0d549df4d33926a86cd1f2",
+      "driver-frame-investigation/recovery-qualification-v1/check-send": "1d4b7f328477ba15f100d51e0bd36102488c35ecefebc80444e0126be006b742",
+      "driver-frame-investigation/recovery-qualification-v1/check-peer-exit": "f5c5a107139159f172314a0d35f5223c20c64809d989fdd8411bbdced675a7e0",
+      "link40/check-write-order": "87b0a5b5ef7e20f47010ee81bb0a9ec55ca5f285d2f8d823ed0b80c1e0d9ac71",
+      "tp-cache-retention/driver-parent-timing-v1/inventory.py": "03674fcc349b64dc41935a2973534cee6191e732e4b7e0e32ce7f32933cb3bee",
+      "driver-frame-investigation/module-fork.py": "51f84a4e19831ffbd42afb9036edb8f94aa0ca8f774fd33fe3334b5320924fd7"
+    },
+    "scope": "Corrected844E/TX32 native RXprogress1/recheck1ms/activepoll0, crossed40+20Gbps pinned UUID/rates. Linux TBV framed path, host registered buffers, no GPU/model/profiler/NVMeadmin sampler. WRITE_WITH_IMM ordering/disjoint/overlap/partial/physical-alias and SEND_WITH_IMM disjoint at depth1/32/128. Sender _exit99 after8or128 accepted WRs; receiver must fail safely, then new QPs SEND/WRITE succeed WITHOUT module reload. No same-QP recovery guarantee; no physical cable disconnect/kernel crash injection; no activeRAW/headerloss or automatic RAW recovery qualification. Transport counters retained; successful cases stop on unexpected fault; faultcases separately accounted. Not a latency/throughput benchmark."
+  },
+  "source_derivation": {
+    "order_source_sha256": "2575ca1c5b3c3ac996bd4b1843473df7c634a22177bfd2eb0a6ef9c1733092d5",
+    "peer_exit_original_sha256": "f6ad7a8bd466a24aaad055aeb252af67655a3adee440334b7a0c00078a10a44c",
+    "changes": {
+      "check-send.cpp": "SEND_WITH_IMM, posted receive SGEs, SEND/RECV CQ opcodes, receive length check, disjoint-only guard, distinct handshake version47; existing pattern/identity/reuse validation unchanged",
+      "check-peer-exit.cpp": "Device selector honors STRIX_RDMA_DEVICE; otherwise original exit-after-accepted-WR harness unchanged"
+    }
+  },
+  "inference": {
+    "complete_and_restored": true,
+    "counts": {
+      "first-baseline": 6,
+      "first-candidate": 6,
+      "second-candidate": 6,
+      "last-baseline": 6
+    },
+    "strict_phase_flags": [],
+    "adaptive_work_differences": [
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_tokens",
+        "reference": 106,
+        "candidate": 80
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_accepted_tokens",
+        "reference": 59,
+        "candidate": 55
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_rounds",
+        "reference": 57,
+        "candidate": 64
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_tokens",
+        "reference": 106,
+        "candidate": 80
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_accepted_tokens",
+        "reference": 67,
+        "candidate": 58
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_rounds",
+        "reference": 56,
+        "candidate": 63
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_tokens",
+        "reference": 113,
+        "candidate": 80
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_accepted_tokens",
+        "reference": 60,
+        "candidate": 55
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_rounds",
+        "reference": 56,
+        "candidate": 64
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_tokens",
+        "reference": 113,
+        "candidate": 80
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_accepted_tokens",
+        "reference": 68,
+        "candidate": 58
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "first-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_rounds",
+        "reference": 55,
+        "candidate": 63
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_tokens",
+        "reference": 106,
+        "candidate": 80
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_accepted_tokens",
+        "reference": 59,
+        "candidate": 55
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_rounds",
+        "reference": 57,
+        "candidate": 64
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_tokens",
+        "reference": 106,
+        "candidate": 80
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_accepted_tokens",
+        "reference": 67,
+        "candidate": 58
+      },
+      {
+        "reference_run": "first-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_rounds",
+        "reference": 56,
+        "candidate": 63
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_tokens",
+        "reference": 113,
+        "candidate": 80
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_accepted_tokens",
+        "reference": 60,
+        "candidate": 55
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 0,
+        "metric": "draft_rounds",
+        "reference": 56,
+        "candidate": 64
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_tokens",
+        "reference": 113,
+        "candidate": 80
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_accepted_tokens",
+        "reference": 68,
+        "candidate": 58
+      },
+      {
+        "reference_run": "last-baseline",
+        "candidate_run": "second-candidate",
+        "case": "short-c2",
+        "repetition": 1,
+        "request_index": 1,
+        "metric": "draft_rounds",
+        "reference": 55,
+        "candidate": 63
+      }
+    ],
+    "transport_error_deltas": {
+      "first-baseline/r0": {},
+      "first-baseline/r1": {},
+      "first-candidate/r0": {},
+      "first-candidate/r1": {},
+      "second-candidate/r0": {},
+      "second-candidate/r1": {},
+      "last-baseline/r0": {},
+      "last-baseline/r1": {}
+    },
+    "rates": {
+      "first-baseline": {
+        "first2K_prefill_ms": 1117.777163,
+        "repeat2K_prefill_ms": 1134.8005660000001,
+        "C1_decode_tps": 56.99466427150272,
+        "C2_whole_wave_tps": 69.79965489578841,
+        "prefill32K_tps": 2046.6194084919434
+      },
+      "first-candidate": {
+        "first2K_prefill_ms": 1120.274938,
+        "repeat2K_prefill_ms": 1131.016418,
+        "C1_decode_tps": 57.35004404465619,
+        "C2_whole_wave_tps": 71.25352343037574,
+        "prefill32K_tps": 2039.4665216675016
+      },
+      "second-candidate": {
+        "first2K_prefill_ms": 1115.3227550000001,
+        "repeat2K_prefill_ms": 1133.406688,
+        "C1_decode_tps": 56.898213383763405,
+        "C2_whole_wave_tps": 70.6595232129935,
+        "prefill32K_tps": 2037.4828376790147
+      },
+      "last-baseline": {
+        "first2K_prefill_ms": 1113.419523,
+        "repeat2K_prefill_ms": 1134.4148069999999,
+        "C1_decode_tps": 56.95834301732278,
+        "C2_whole_wave_tps": 68.56751091771575,
+        "prefill32K_tps": 2035.45078616282
+      }
+    },
+    "scope": "Fixed B/C/C/B fresh starts, six canonical requests per start. Same ccdb9495 engine, fixed matched boot/topology. No profiling/admin NVMe sampler, extra priming, full table warming or policy change. Preserve all correctness failures, strict phase regressions (>5% AND >3ms), adaptive-work differences and transport errors. Four starts are a bounded diagnostic, not a throughput confidence result or proof of equivalent performance. No defaults/merges. Restore approved81C6 at end and between arms."
+  },
+  "inference_validation": {
+    "all_24_canonical_identities_exact": true,
+    "all_8_C2_requests_physical_width_2": true,
+    "both_ranks_same_engine_and_settings": true,
+    "frozen_harness_hashes_unchanged": true,
+    "all_8_transport_windows_zero_errors": true,
+    "both_approved_drivers_idle_and_four_rails": true,
+    "checked_kernel_fault_patterns_absent": true,
+    "kernel_logs_retained_not_empty": true,
+    "scope": "Bounded diagnostic; no confidence/equivalence/overnight/RAW qualification. Original C2 flag not reproduced, not universally cleared."
+  }
+}

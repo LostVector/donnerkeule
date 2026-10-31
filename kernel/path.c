@@ -1018,6 +1018,41 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 
 	dma_sync_single_for_cpu(tb_ring_dma_device(ring), f->dma,
 				TBV_DATA_FRAME_SIZE, DMA_FROM_DEVICE);
+	/* Never parse, place or ACK bytes from a descriptor the NHI marked
+	 * corrupt. Do not derive credits from an untrusted header: the next
+	 * valid path sequence returns the skipped framed-data credits.
+	 */
+	if (frame->flags & (RING_DESC_CRC_ERROR | RING_DESC_BUFFER_OVERRUN)) {
+		if (state) {
+			atomic64_inc(&state->data_rx_bad_frame);
+			if (frame->flags & RING_DESC_CRC_ERROR)
+				atomic64_inc(&state->data_rx_crc_error);
+			if (frame->flags & RING_DESC_BUFFER_OVERRUN)
+				atomic64_inc(&state->data_rx_overrun);
+		}
+		/* Headerless chunks have no reliable offset after a damaged
+		 * descriptor. Fail closed until this path is recreated rather
+		 * than shifting subsequent chunks and completing corrupt data.
+		 */
+		if (path->rx_raw_pending && !path->rx_raw_poisoned) {
+			path->rx_raw_poisoned = true;
+			if (state)
+				atomic64_inc(&state->data_rx_raw_poisoned);
+		}
+		pr_warn_ratelimited("native RX descriptor rejected frame_len=%u hw_flags=0x%x crc=%u overrun=%u sof=%u eof=%u path_id=%u raw_poisoned=%u\n",
+				    len, frame->flags,
+				    !!(frame->flags & RING_DESC_CRC_ERROR),
+				    !!(frame->flags & RING_DESC_BUFFER_OVERRUN),
+				    frame->sof, frame->eof,
+				    path->rail ? path->rail->key.path_id : 0,
+				    path->rx_raw_poisoned);
+		goto repost;
+	}
+	if (path->rx_raw_poisoned) {
+		if (state)
+			atomic64_inc(&state->data_rx_raw_poison_drop);
+		goto repost;
+	}
 	was_raw_payload = path->rx_raw_pending;
 	if (len <= TBV_DATA_FRAME_SIZE && state) {
 		struct tbv_native_data_header hdr;
@@ -1032,6 +1067,15 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 			tbv_path_rx_raw_payload(path, state, f->buf, len);
 		} else {
 				ret = tbv_native_data_parse_header(f->buf, len, &hdr);
+				if (!ret && hdr.length > len - TBV_NATIVE_DATA_HDR_SIZE)
+					pr_warn_ratelimited("native RX length diagnostic frame_len=%u hw_flags=0x%x crc=%u overrun=%u sof=%u eof=%u op=%u wire_flags=0x%x payload_len=%u psn=%u off=%u path_id=%u\n",
+							    len, frame->flags,
+							    !!(frame->flags & RING_DESC_CRC_ERROR),
+							    !!(frame->flags & RING_DESC_BUFFER_OVERRUN),
+							    frame->sof, frame->eof, hdr.opcode,
+							    hdr.flags, hdr.length, hdr.psn,
+							    hdr.frag_offset,
+							    path->rail ? path->rail->key.path_id : 0);
 				if (!ret && hdr.opcode == TBV_NATIVE_DATA_OP_PATH_CREDIT) {
 					if (tbv_native_data_valid_path_credit(&hdr)) {
 						add_remote_credits = hdr.imm_data;
@@ -1082,6 +1126,7 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 		atomic64_inc(&state->data_rx_bad_frame);
 	}
 
+repost:
 	if (path->state == TBV_PATH_RING_STARTED ||
 	    path->state == TBV_PATH_TUNNEL_ENABLED) {
 		int ret = tbv_path_post_rx_frame(f);
