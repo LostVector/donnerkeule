@@ -29,7 +29,8 @@ ENV_KEYS = ('LD_LIBRARY_PATH', 'RDMAV_DRIVERS', 'HIP_VISIBLE_DEVICES',
             'ROCR_VISIBLE_DEVICES', 'ROCP_TOOL_ATTACH')
 ERROR_RE = re.compile(r'GPU reset|GPU fault|ring .*timeout|amdgpu.*(?:\bfault\b|timeout)|'
                       r'nvme.*(?:timeout|reset|I/O error)|Out of memory|Killed process|'
-                      r'BUG:|Oops:|general protection fault|native RX (?:bad|lost|reorder timeout)|'
+                      r'BUG:|Oops:|general protection fault|native RX (?:bad|lost|reorder timeout|'
+                      r'descriptor (?:diagnostic|rejected)|length diagnostic)|'
                       r'thunderbolt_ibverbs:.*retransmit|thunderbolt.*(?:failed|error)', re.I)
 
 
