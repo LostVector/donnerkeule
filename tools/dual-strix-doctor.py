@@ -171,8 +171,11 @@ def collect(profile, hash_binaries=False):
             snap = command(['sudo', '-n', str(p), 'snapshot'])
             if snap['returncode'] == 0:
                 summary = snap['stdout'].split('FILE /sys/kernel/debug/thunderbolt_ibverbs/summary\n', 1)[-1].split('\nFILE ', 1)[0]
-                data['driver_summary'] = {'available': True, 'values': dict(
-                    line.split(': ', 1) for line in summary.splitlines() if ': ' in line)}
+                values = dict(line.split(': ', 1) for line in summary.splitlines() if ': ' in line)
+                if 'profile' in values:
+                    data['driver_summary'] = {'available': True, 'values': values}
+                else:
+                    data['driver_summary']['reason'] = 'Native debugfs summary unavailable in helper output'
             else:
                 data['driver_summary']['reason'] = snap['stderr'] or 'helper snapshot failed'
         except (OSError, AssertionError):
@@ -202,6 +205,10 @@ def assess(hosts, profile):
     expected = profile.get('boot_flags', {})
     for h in hosts:
         name = h['host']
+        if h.get('ttm_pages_limit') is None:
+            add('UNKNOWN', name, 'TTM limit', 'Effective pages_limit unavailable')
+        if not h.get('GPU') or any(g.get('mem_info_gtt_total') is None or g.get('mem_info_vram_total') is None for g in h['GPU']):
+            add('UNKNOWN', name, 'GPU limits', 'Effective GTT/VRAM capacity unavailable')
         flags = boot_flags(h.get('cmdline') or '')
         if not h.get('cmdline'):
             add('UNKNOWN', name, 'boot', 'Cannot read running command line')

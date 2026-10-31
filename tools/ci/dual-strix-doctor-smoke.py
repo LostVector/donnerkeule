@@ -22,7 +22,7 @@ def host(name, local_ids, peer_ids):
         'rails': [dict(name=f'usb4_rdma{i}', controller=f'nhi{i//2}', ports=[{'state': '4: ACTIVE'}]) for i in range(4)],
         'verbs': {'returncode': 0, 'stdout': 'usb4_rdma0 usb4_rdma1 usb4_rdma2 usb4_rdma3'},
         'driver_summary': {'available': True, 'values': {'configured_links': '0', 'native_same_peer_multicable': 'enabled'}},
-        'kernel_log': {'available': True, 'errors': []}, 'processes': [], 'meminfo': {}, 'GPU': [],
+        'kernel_log': {'available': True, 'errors': []}, 'processes': [], 'meminfo': {}, 'GPU': [{'mem_info_gtt_total': '100', 'mem_info_vram_total': '2'}],
         'cpu': {'scaling_governor': 'powersave', 'energy_performance_preference': 'balance_performance'}}
 
 profile = {'boot_flags': {'ttm.pages_limit': '32505856', 'amd_iommu': 'off', 'amdgpu.gttsize': None, 'iommu': None}}
@@ -64,6 +64,8 @@ x = copy.deepcopy(a); x['verbs']['stdout'] = ''
 assert has(findings(x, b), 'FAIL', 'verbs provider')
 x = copy.deepcopy(a); x['kernel_log']['available'] = False
 assert has(findings(x, b), 'UNKNOWN', 'kernel log')
+x = copy.deepcopy(a); x['ttm_pages_limit'] = None; x['GPU'] = []
+assert has(findings(x, b), 'UNKNOWN', 'TTM limit') and has(findings(x, b), 'UNKNOWN', 'GPU limits')
 # Secrets are deliberately not collected even when adjacent to legitimate options.
 options = d.safe_options(['gufo', '--tp-control-token', 'SECRET', '--model', '/models/q4.gguf',
                           '--api-key=SECRET2', '--context=65536'])
