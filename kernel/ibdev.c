@@ -3517,7 +3517,11 @@ static void tbv_send_tx_done(void *ctx, int status)
 
 	tbv_send_retire_frames(send, 1, status);
 
-	if (!status) {
+	/* Completion retires ownership before canceling surplus retry frames.
+	 * Their callbacks still retire DMA references, but must not poison a
+	 * successful QP or the application's next WR.
+	 */
+	if (!status || tbv_send_is_completed(send)) {
 		tbv_send_ctx_put(send);
 		return;
 	}
@@ -3525,9 +3529,14 @@ static void tbv_send_tx_done(void *ctx, int status)
 	{
 		LIST_HEAD(complete);
 		struct tbv_send_ctx *pos;
+		bool failed = false;
 
 		if (tbv_qp_complete_send_ordered(tqp, send->psn, status,
 						 &complete, NULL)) {
+			/* An ACK can win after the completed check. Only an owned
+			 * send's error status is a new fault, not ACK-ready success.
+			 */
+			failed = send->completion_status != 0;
 			while (!list_empty(&complete)) {
 				pos = list_first_entry(&complete,
 						       struct tbv_send_ctx,
@@ -3537,9 +3546,9 @@ static void tbv_send_tx_done(void *ctx, int status)
 				tbv_send_ctx_put(pos);
 			}
 		}
+		if (failed && tbv_native_sq_ordered(tqp))
+			tbv_qp_mark_error(tqp);
 	}
-	if (tbv_native_sq_ordered(tqp))
-		tbv_qp_mark_error(tqp);
 	tbv_send_ctx_put(send);
 }
 

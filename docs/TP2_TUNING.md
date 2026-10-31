@@ -9,6 +9,14 @@ compatible driver, provider and Gufo are installed**. It is not a fresh-OS
 installer; pinned source bundles, dependencies and bounded qualification are
 linked below.
 
+## RX error/retry recovery investigation
+
+An actual large-prefill failure reproduced without a GPU and exposed missing
+CRC/overrun rejection and incorrect QP poisoning during completed-retry cleanup.
+See [the experimental correction and bounded evidence](experiments/rx-error-retry-recovery.md).
+This is correctness work; it does not replace the qualified profile below or
+claim a new inference-speed result.
+
 ## Merged fork driver checked on this pair
 
 Fork PRs #3, #1 and #2 are now merged into main. The exact combined module 6C607 passed bounded host/GPU-staged WRITE, ordering/alias, depth 128 / 5 MiB, disconnect/recovery and 20-request TP2 parity checks with TX32, default TX128 and optional adaptive/full 100 µs. [Report, pinned build, all 96,000 RTT quantiles and limits](experiments/merged-driver-qualification.md). This is not overnight/all-verbs or new model-performance certification. Native TX default is now128; the explicit32 profile below preserves the measured baseline. Both test hosts were restored to81C6/TX32 after qualification.
