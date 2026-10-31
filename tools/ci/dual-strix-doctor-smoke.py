@@ -41,6 +41,9 @@ assert d.link_rate('10.0 Gb/s', '2') == 20  # Never add RX+TX to report 40.
 assert d.link_rate(None, '2') is None
 assert not d.ERROR_RE.search('amdgpu: TMZ feature disabled as experimental (default)')
 assert d.ERROR_RE.search('amdgpu: GPU fault detected')
+for message in ('native RX bad header reason=frame_len', 'native RX lost 171 frame(s)',
+                'native RX reorder timeout qpn=0x903', 'thunderbolt_ibverbs: native retransmit qpn=0x903'):
+    assert d.ERROR_RE.search(message), message
 # Historical asymmetric heap configuration and conflicting duplicate arguments.
 x = copy.deepcopy(b); x['cmdline'] = 'quiet splash'
 assert has(findings(a, x), 'FAIL', 'boot') and has(findings(a, x), 'FAIL', 'boot parity')
