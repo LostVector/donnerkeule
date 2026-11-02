@@ -1,13 +1,30 @@
 # Gufo TP2 on dual Strix Halo: tested settings and launch recipe
 
-Updated 2026-10-28 on GMKtec EVO-X2 + Corsair AI Workstation300,
+Driver/scaling measurements recorded 2026-10-28 on GMKtec EVO-X2 + Corsair AI Workstation300,
 each Ryzen AI Max+395/128GB. Initial measurements used20Gbit/s per direction;
-each cable now qualifies at40Gbit/s (20Gbit/s/lane ×2), with two cables tested.
+each cable has previously qualified at40Gbit/s (20Gbit/s/lane ×2), with two cables tested.
+The later maintained-engine qualification uses crossed40+20Gb/s links; see its
+separate record below.
 This records our best-tested **experimental starting profiles**, not a proven
 universal optimum. It includes a one-command-per-rank launcher **after the
 compatible driver, provider and Gufo are installed**. It is not a fresh-OS
 installer; pinned source bundles, dependencies and bounded qualification are
 linked below.
+
+## Maintained Gufo branch
+
+For a new Gufo build, use [LostVector/gufo's maintained `tp2` branch](https://github.com/LostVector/gufo/tree/tp2).
+It combines gufo-org/gufo with the Neuhaus RDMA implementation and reviewed
+fixes. Fork `main` mirrors canonical upstream and does not select the TP2
+integration. The Gufo source bundle and binary hash later in this guide remain
+provenance for the older driver/scaling measurements; those rates are not
+remeasurements of the current engine.
+
+See [the maintained-engine build and qualification record](experiments/maintained-gufo.md)
+for the exact adopted revision, matching-peer requirement and settings. Updating
+Gufo does not require a new driver reload or kernel change for the tested native
+host-window stack. The launcher below remains the AR profile; MTP measurements
+require the separate MTP checkpoint and `--speculative mtp --mtp-model PATH`.
 
 ## RX error/retry recovery investigation
 
