@@ -1,11 +1,18 @@
 # Maintained Gufo build for this pair
 
-Adopted Gufo revision: `98459477fca57f8bbc6fe3f1156b87f499b65be4`, on
+Adopted production revision: `9c7157201e8aa30cbfc51ddf3595a3dea13b196a`, on
 [LostVector/gufo `tp2`](https://github.com/LostVector/gufo/tree/tp2).
-Its tree equals the separately built and qualified integration `246a8d11`.
-The fork's `main` mirrors gufo-org/gufo at `276dd180`. Neuhaus supplies the
-original RDMA lineage; the old source bundles remain available for reproducing
-historical measurements.
+The branch additionally contains documentation; its production sources match that
+qualified revision. Fork `main` mirrors gufo-org/gufo at `773a1641`.
+Neuhaus supplies the original RDMA lineage. The earlier combined adoption
+`98459477` (tree equal to qualified `246a8d11`) and its measured gains remain
+historical records; they are not relabeled as new measurements.
+
+The [current intake record](https://github.com/LostVector/gufo/blob/tp2/docs/patches/tp2-adoption/upstream-773a1641.md)
+contains the exact executable hash, commands, raw evidence, actual32K continuation
+coverage and retained inconclusive startup timings. This is a correctness/upstream
+sync, not a newly established speedup. Q8 reuse forkPR14/upstreamPR958 remain
+separate drafts and are not included.
 
 ## Build once and deploy the same executable to both nodes
 
@@ -16,7 +23,7 @@ and your working ROCm compiler/runtime environment. For the native RDMA build:
 git clone --branch tp2 --single-branch https://github.com/LostVector/gufo.git gufo-tp2
 cd gufo-tp2
 # Replace this with the full adopted revision recorded above.
-git checkout 98459477fca57f8bbc6fe3f1156b87f499b65be4
+git checkout 9c7157201e8aa30cbfc51ddf3595a3dea13b196a
 cmake --preset release -DGUFO_ENABLE_TP2_RDMA=ON \
   -DBUILD_TESTING=OFF -DGUFO_BUILD_TOOLS=OFF -DCMAKE_HIP_ARCHITECTURES=gfx1151
 cmake --build --preset release --parallel 4
@@ -48,10 +55,16 @@ settings were unchanged for this Gufo qualification.
   dependencies. This reduces completion tails; it is not a faster-token claim.
 
 Both behaviors are part of the maintained engine; no new tuning flag is needed.
+Canonical773 also brings checkpoint device-headroom fallback and returns local
+prefill scratch to4,096rows. Native TP already capped its trunk batches to fit the
+exchange window, so the tested TP2 chunk setting remains2,048. Distributed HTTP
+continues to use separate mirrored captures; no new in-pass TP capability or
+driver setting is enabled.
+
 
 ## Settings and evidence boundaries
 
-The combined build passed native12-output replay,4cache/9cancellation records,
+The original combined984/246 build passed native12-output replay,4cache/9cancellation records,
 60 B/C/B controls and C3/C4/staggered completions, plus live owner-read EIO and
 peer-process loss followed by separate fresh recoveries. Healthy owner/receiver
 row counters match, showing the sharing path was active. Final transport/kernel,
@@ -59,6 +72,25 @@ boot/config/topology and idle checks pass. Hosted
 [repository](https://github.com/LostVector/gufo/actions/runs/41417033951) and
 [Windows packaging/CPU](https://github.com/LostVector/gufo/actions/runs/41417037085)
 checks passed for the qualified246 source. Windows TP GPU inference is not covered.
+
+Current9c independently passes production release/HIP operators, fresh native12
+outputs/cache4/cancellation9 and matched94/9c/94 C3/C4/ragged60records. Native
+checkpoint assertions pass at short/resumed boundaries and at an actual32,768-token
+boundary in65,536-capacity sessions, AR/MTP, including asymmetric process-reported
+memory headroom. Single-node snapshot/adapter in-pass headroom tests also pass.
+[Current repository CI](https://github.com/LostVector/gufo/actions/runs/41453594920)
+and [current Windows packaging/CPU CI](https://github.com/LostVector/gufo/actions/runs/41453598440)
+pass on exact9c. Windows TP GPU inference is not covered by the fork workflow.
+
+The new wider comparison retains14phase entries, chiefly first-C3 startup gaps.
+Two bounded source traces investigate them; the final first-four-cycle comparison
+matches all actual plans/chains/packed rows on both nodes. Its first target-forward
+wall time is56.45/57.38/59.65ms (baseline/integration/baseline). This is combined
+host/GPU/communication/wait time, not pure dispatch or GPU compute. It does not
+clear the original flags or establish timing equivalence. Timings remain explicitly
+inconclusive/advisory; the canonical correctness sync is adopted without a speed
+claim. See the linked current record for every raw result, failure and limitation.
+
 
 These runs used Flash-Next UD-Q4_K_XL plus shared-Q8_0 MTP, greedy/thinking off,
 65,536 context capacity, two slots (four in the wider test), prefill chunk2,048,
@@ -102,7 +134,7 @@ The standalone PLE study supports +0.699% first-C1 server decode and +1.940%
 short-C2 whole-wave rate at its recorded source/history. The standalone early-End
 study supports a completion-tail reduction41.974→0.459ms across ten matched pairs.
 These results belong to their original measured revisions, not this combined
-adoption commit. Current combined B/C/B output/ordering checks are bounded
+adoption commit. The original combined B/C/B output/ordering checks are bounded
 qualification, not a statistical throughput comparison. Twelve wider phase
 entries and26 changed-work fields remain advisory, including C4 gaps and the
 ragged33-token timing mode. No uniform-latency, equivalence, model-quality or new
