@@ -21,7 +21,7 @@ provenance for the older driver/scaling measurements; those rates are not
 remeasurements of the current engine.
 
 See [the maintained-engine build and qualification record](experiments/maintained-gufo.md)
-for the exact adopted production revision (`5e766353`, canonical `8ab834a5`),
+for the exact adopted production revision (`75de9f82`, canonical `9bd24d26`),
 matching-peer requirement, current validation and retained inconclusive timings. Updating
 Gufo does not require a new driver reload or kernel change for the tested native
 host-window stack. The launcher below remains the AR profile; MTP measurements
