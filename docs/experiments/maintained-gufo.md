@@ -1,18 +1,22 @@
 # Maintained Gufo build for this pair
 
-Adopted production revision: `9c7157201e8aa30cbfc51ddf3595a3dea13b196a`, on
+Adopted production revision: `5e7663534afd17f7d4d18162285d3d81f1acf42d`, on
 [LostVector/gufo `tp2`](https://github.com/LostVector/gufo/tree/tp2).
 The branch additionally contains documentation; its production sources match that
-qualified revision. Fork `main` mirrors gufo-org/gufo at `773a1641`.
+qualified revision. Fork `main` mirrors gufo-org/gufo at `8ab834a5`.
 Neuhaus supplies the original RDMA lineage. The earlier combined adoption
 `98459477` (tree equal to qualified `246a8d11`) and its measured gains remain
 historical records; they are not relabeled as new measurements.
 
-The [current intake record](https://github.com/LostVector/gufo/blob/tp2/docs/patches/tp2-adoption/upstream-773a1641.md)
-contains the exact executable hash, commands, raw evidence, actual32K continuation
-coverage and retained inconclusive startup timings. This is a correctness/upstream
-sync, not a newly established speedup. Q8 reuse forkPR14/upstreamPR958 remain
-separate drafts and are not included.
+The [current intake record](https://github.com/LostVector/gufo/blob/tp2/docs/patches/tp2-adoption/upstream-8ab834a5.md)
+contains the exact executable hash, commands, raw evidence, focused cache-admission
+coverage and both passing source-head CI runs. It adds measured heap-impact RAM
+checkpoint-cache admission, clearer session-capacity errors and exact retention
+refusal recognition. The [previous intake](https://github.com/LostVector/gufo/blob/tp2/docs/patches/tp2-adoption/upstream-773a1641.md)
+retains its actual32K continuation coverage and inconclusive startup timings;
+these were not rerun or waived by this sync. This is a correctness/upstream sync,
+not a newly established speedup. Q8 reuse forkPR14/upstreamPR958 and fused-HC
+forkPR15 remain separate drafts and are not included.
 
 ## Build once and deploy the same executable to both nodes
 
@@ -23,7 +27,7 @@ and your working ROCm compiler/runtime environment. For the native RDMA build:
 git clone --branch tp2 --single-branch https://github.com/LostVector/gufo.git gufo-tp2
 cd gufo-tp2
 # Replace this with the full adopted revision recorded above.
-git checkout 9c7157201e8aa30cbfc51ddf3595a3dea13b196a
+git checkout 5e7663534afd17f7d4d18162285d3d81f1acf42d
 cmake --preset release -DGUFO_ENABLE_TP2_RDMA=ON \
   -DBUILD_TESTING=OFF -DGUFO_BUILD_TOOLS=OFF -DCMAKE_HIP_ARCHITECTURES=gfx1151
 cmake --build --preset release --parallel 4
@@ -60,6 +64,11 @@ prefill scratch to4,096rows. Native TP already capped its trunk batches to fit t
 exchange window, so the tested TP2 chunk setting remains2,048. Distributed HTTP
 continues to use separate mirrored captures; no new in-pass TP capability or
 driver setting is enabled.
+Canonical8ab measures whether registering checkpoint-cache host pages consumes
+the GPU heap, retaining an uncharged registration even when the heap is already
+tight. Host reserve and dispatch reserve checks remain active. The n-gram table
+remains disk-backed. No new tuning flag or driver reload is required by this
+Gufo source sync; all earlier performance records retain their original revisions.
 
 
 ## Settings and evidence boundaries
