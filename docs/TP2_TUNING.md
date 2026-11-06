@@ -450,3 +450,14 @@ rejected and recovered; a subsequent actual dual-cable DFlash run recovered from
 two more errors. This is bounded recovery evidence, not elimination of physical
 CRC errors or a driver speedup. Historical81C6 restoration statements above
 describe those earlier experiments, not the current default.
+
+## November 6 synced driver deployed
+
+The EVO/Corsair pair now runs the driver built from fork main `3bbb3ee`, including
+the upstream 248 MiB message limit and our recovery fixes, with explicit TX32 and
+RX progress/recheck 1 ms. Both nodes' normal reload and initializer metadata
+select the new build; `844E` is retained for explicit rollback.
+[Deployment profile, large-message tests and inference qualification](experiments/synced-main-deployment-2026-11-06.md)
+record the bounded checks and remaining hardware/soak limits. This supersedes the
+November 5 default above; the source's native TX128 default does not override this
+explicitly qualified lab profile.
