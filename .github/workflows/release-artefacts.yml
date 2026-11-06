@@ -21,6 +21,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  cpu-regressions:
+    name: driver CPU regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Production callback and protocol regressions
+        run: make test TEST_OUTPUT=artifacts/driver-cpu
+      - name: Retain results and failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: driver-cpu-results
+          path: artifacts/driver-cpu
+
   build:
     name: build (${{ matrix.name }})
     runs-on: ubuntu-latest

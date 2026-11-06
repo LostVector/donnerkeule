@@ -10,7 +10,11 @@ KERNEL_DIR ?= kernel
 DKMS_PACKAGE_NAME = $(shell awk -F '"' '/^PACKAGE_NAME=/ { print $$2; exit }' dkms.conf)
 DKMS_PACKAGE_VERSION = $(shell awk -F '"' '/^PACKAGE_VERSION=/ { print $$2; exit }' dkms.conf)
 
-.PHONY: all clean modules modules_install help dkms-add dkms-build dkms-install dkms-remove
+.PHONY: all clean modules modules_install help dkms-add dkms-build dkms-install dkms-remove test
+
+# Host regressions only: no root, kernel headers, GPU or attached peer required.
+test:
+	python3 tools/ci/run-smoke.py $(if $(TEST_OUTPUT),--output "$(TEST_OUTPUT)")
 
 all: modules
 
@@ -27,6 +31,7 @@ help:
 	$(MAKE) -C $(KERNEL_DIR) help
 	@echo ""
 	@echo "Top-level targets:"
+	@echo "  test              Run CPU regressions without root or hardware"
 	@echo "  dkms-add          Register this source tree with DKMS"
 	@echo "  dkms-build        Build with DKMS for KVER=$$(uname -r)"
 	@echo "  dkms-install      Install with DKMS for KVER=$$(uname -r)"
