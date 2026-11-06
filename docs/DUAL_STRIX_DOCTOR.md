@@ -84,9 +84,10 @@ Both retained the exact 124 GiB HIP total. Reported GTT differed by 4/8 KiB acro
 reboots; this is not a performance equivalence study. Different BIOS VRAM
 reservations can still produce different DRM GTT capacities with matching flags.
 
-Two current lab cables each negotiate 20 Gb/s per direction (10 Gb/s/lane × 2).
-Historical 40 Gb/s link observations do not override current negotiated sysfs
-readings. Change `min_link_gbps` for the hardware/configuration actually required;
+The October30 readback recorded two20Gb/s-per-direction cables. The November6
+readback instead reports crossed40+20Gb/s connections (20/10Gb/s per lane, two
+lanes each). Neither historical observation overrides a fresh sysfs reading.
+Change `min_link_gbps` for the hardware/configuration actually required;
 there is no universal 40 Gb/s-per-cable success assertion.
 
 Optional profile fields:

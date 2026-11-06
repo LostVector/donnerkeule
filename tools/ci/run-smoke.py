@@ -25,7 +25,7 @@ PY_TESTS = {
         "verbs-control-lifetime", "verbs-dma-wait", "verbs-post",
         "verbs-rx-state", "host-credit-peek", "configfs-state", "bench-helpers",
         "profiling", "framework-desktop", "rx-error-recovery", "descriptor-session",
-        "dual-strix-doctor",
+        "dual-strix-doctor", "fault-injection",
     )
 }
 PY_TESTS.update({
@@ -66,6 +66,8 @@ def main():
     selected = list(dict.fromkeys(args.suite or names))
     env = dict(os.environ)
     env.setdefault("TBV_TEST_SANITIZERS", "1")
+    if output:
+        env.setdefault("TBV_FAULT_OUTPUT", str(output / "fault-injection"))
     results = []
     with tempfile.TemporaryDirectory(prefix="tbv-smoke-") as temporary:
         for name in selected:
