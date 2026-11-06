@@ -35,6 +35,13 @@ See [the experimental correction and bounded evidence](experiments/rx-error-retr
 This is correctness work; it does not replace the qualified profile below or
 claim a new inference-speed result.
 
+## Preflight before launching
+
+Run the [read-only dual Strix doctor](DUAL_STRIX_DOCTOR.md) against the management
+SSH peer to check running boot policy, both physical cables and peer UUIDs, native
+rails, provider visibility and configuration parity. Unknown/protected checks are
+reported explicitly; this does not replace payload or inference qualification.
+
 ## Merged fork driver checked on this pair
 
 Fork PRs #3, #1 and #2 are now merged into main. The exact combined module 6C607 passed bounded host/GPU-staged WRITE, ordering/alias, depth 128 / 5 MiB, disconnect/recovery and 20-request TP2 parity checks with TX32, default TX128 and optional adaptive/full 100 µs. [Report, pinned build, all 96,000 RTT quantiles and limits](experiments/merged-driver-qualification.md). This is not overnight/all-verbs or new model-performance certification. Native TX default is now128; the explicit32 profile below preserves the measured baseline. Both test hosts were restored to81C6/TX32 after qualification.
@@ -432,3 +439,14 @@ unload-and-load can bind the old peer session even while rails report ready.
 See [descriptor session lifecycle and read-only checker](experiments/descriptor-session-lifecycle.md)
 for the observed failure, corrected procedure and bounded validation. This does
 not recommend descriptor mode over the measured native decode configuration.
+
+## November 5 runtime default
+
+The EVO/Corsair lab now loads the CRC/retry recovery build844E as its approved
+baseline, explicitly TX32/RXprogress1ms, preserving81C6 only as a historical
+comparison. The default helper registry and post-reboot initializer were migrated
+together. Fresh fixed-buffer tests verified74.883GiB with11 CRC-marked completions
+rejected and recovered; a subsequent actual dual-cable DFlash run recovered from
+two more errors. This is bounded recovery evidence, not elimination of physical
+CRC errors or a driver speedup. Historical81C6 restoration statements above
+describe those earlier experiments, not the current default.
