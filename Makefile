@@ -6,6 +6,9 @@ KVER ?= $(shell uname -r)
 KDIR ?= /lib/modules/$(KVER)/build
 KERNEL_DIR ?= kernel
 
+# Adding utility targets above `all` must not change the DKMS/plain-make contract.
+.DEFAULT_GOAL := all
+
 # Expand only for DKMS targets: plain module builds may omit dkms.conf.
 DKMS_PACKAGE_NAME = $(shell awk -F '"' '/^PACKAGE_NAME=/ { print $$2; exit }' dkms.conf)
 DKMS_PACKAGE_VERSION = $(shell awk -F '"' '/^PACKAGE_VERSION=/ { print $$2; exit }' dkms.conf)

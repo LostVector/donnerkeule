@@ -49,7 +49,7 @@ install_deps() {
 			linux-headers-amd64 make python3 tar xz-utils
 	elif command -v dnf >/dev/null 2>&1; then
 		dnf install -y -q --setopt=install_weak_deps=False \
-			bash ca-certificates diffutils dkms file findutils gcc git \
+			bash ca-certificates diffutils dkms file findutils gcc gcc-c++ git \
 			kernel-devel kernel-headers kmod libasan libubsan make openssl python3 tar xz >/dev/null
 	elif command -v pacman >/dev/null 2>&1; then
 		pacman -Syu --noconfirm --needed \

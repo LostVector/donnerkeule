@@ -25,7 +25,7 @@ PY_TESTS = {
         "verbs-control-lifetime", "verbs-dma-wait", "verbs-post",
         "verbs-rx-state", "host-credit-peek", "configfs-state", "bench-helpers",
         "profiling", "framework-desktop", "rx-error-recovery", "descriptor-session",
-        "dual-strix-doctor", "fault-injection",
+        "dual-strix-doctor", "fault-injection", "build-contract",
     )
 }
 PY_TESTS.update({

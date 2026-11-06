@@ -20,7 +20,7 @@ existing distribution module/package builds. CI artifacts retain failed logs.
 
 ## What is covered today
 
-The runner contains24 groups, including an11-test Framework Desktop group.
+The runner contains25 groups, including an11-test Framework Desktop group.
 Many C regressions extract actual production functions and compile them with
 small host shims for kernel types, locks, allocators and hardware callbacks.
 Other groups exercise protocol code directly, provider patches or CLI tools;
@@ -37,6 +37,7 @@ some source-layout assertions enforce wiring. These forms have different limits.
 | Control lifetime, CQ exhaustion, allocation cleanup | `verbs-control-lifetime`, `verbs-post`, `verbs-rx-state`, framework provider-CQ tests | Not a complete verbs conformance suite |
 | Stale peer identity/session snapshot | `descriptor-session`:11 valid/stale/malformed/partial CLI cases | Does not emulate kernel hotplug |
 | Protocol sequencing/reliability/configuration | `proto`, `reliability`, `identity`, `config` | Protocol invariants only |
+| Plain make/DKMS stops building modules | `build-contract`: real parent makefile with a mocked module sub-build, plus the old-default negative control | Does not replace real DKMS/container builds |
 | Test infrastructure reports false success | `test-runner`: failed compilers, continued groups, JUnit failures, unknown suite, retained prior logs | Runner mechanics only |
 | TX packet pool reuse/ownership | `fault-injection`: actual allocator/release/completion;128 release states,32 completion states,10000 concurrent allocations/releases and reentrant completion | Host mutexes and mocked DMA unmap/free, not NHI DMA reuse safety |
 | Combined corruption/lifecycle/credit failures | Same group:146432 deterministic RX events/oracle steps; descriptor flags×length×cancellation×state, seeded loss/sequence wrap and restart | One replayable seed and selected boundaries, not exhaustive transport execution |
